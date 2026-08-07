@@ -1,0 +1,163 @@
+---
+title: "Authentication & Panel Gating"
+description: "How user authentication, premium panel gating, and server-side session enforcement work in World Monitor — Supabase auth, bearer tokens, and entitlement checks."
+---
+
+WorldMonitor signs users in with [Supabase](https://supabase.com), on the same
+project sibt.ai uses, so one account works on both sites. Entitlements do not
+carry across: those live in Convex per product. The auth system gates premium
+panels behind sign-in and tier checks, and enforces session-based access on
+server-side API endpoints by verifying the JWT locally.
+
+---
+
+## Auth Stack
+
+| Layer | Technology | Purpose |
+|-------|-----------|---------|
+| Auth provider | Supabase | Sign-in (password, Google), session management |
+| JWT verification | jose + Supabase JWKS | Server-side bearer token validation (no round-trip) |
+| Convex integration | Supabase access token | Convex auth with `applicationID: "authenticated"` |
+| Auth state | `auth-state.ts` | Reactive browser auth state |
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `convex/auth.config.ts` | Convex auth provider config — Supabase issuer + applicationID |
+| `src/services/supabase-client.ts` | Lazy supabase-js client, reads the two `VITE_SUPABASE_*` values |
+| `src/services/auth.ts` | `initAuth()`, `openSignIn()`, `signOut()`, `getAuthToken()` |
+| `src/services/auth-state.ts` | Reactive auth state, session hydration |
+| `src/components/AuthHeaderWidget.ts` | Header sign-in button and account menu |
+| `server/auth-session.ts` | Server-side JWT validation with jose + cached JWKS |
+
+---
+
+## Panel Gating
+
+Premium panels show a CTA overlay instead of content until the user meets the access requirements.
+
+### Gate Reasons
+
+| Reason | What the user sees | Resolution |
+|--------|-------------------|------------|
+| `ANONYMOUS` | "Sign In to Unlock" | Sign in |
+| `FREE_TIER` | "Upgrade to Pro" | Upgrade subscription |
+| `NONE` | Normal panel content | Already unlocked |
+
+### How to Configure Which Panels Are Premium
+
+Three files control gating. **All three must stay in sync** when adding or removing premium panels.
+
+#### 1. Panel config — `src/config/panels.ts`
+
+Add `premium: 'locked'` to the panel entry in the relevant variant:
+
+```ts
+// In FULL_PANELS, FINANCE_PANELS, etc.
+'my-panel': { name: 'My Panel', enabled: true, premium: 'locked' }
+```
+
+#### 2. Client-side gate set — `src/app/panel-layout.ts`
+
+Add the panel key to `WEB_PREMIUM_PANELS`:
+
+```ts
+const WEB_PREMIUM_PANELS = new Set([
+  'stock-analysis',
+  'stock-backtest',
+  'daily-market-brief',
+  'my-panel',  // <-- add here
+]);
+```
+
+This set drives the reactive UI gating — when auth state changes, panels in this set get checked and show/hide CTAs accordingly.
+
+#### 3. Server-side API enforcement (if the panel calls premium APIs)
+
+**Client token injection** — `src/services/runtime.ts` (`WEB_PREMIUM_API_PATHS`):
+
+```ts
+const WEB_PREMIUM_API_PATHS = new Set([
+  '/api/market/v1/analyze-stock',
+  '/api/market/v1/get-stock-analysis-history',
+  '/api/market/v1/backtest-stock',
+  '/api/market/v1/list-stored-stock-backtests',
+  '/api/my-domain/v1/my-endpoint',  // <-- add here
+]);
+```
+
+When a fetch request matches a path in this set and the user is signed in, the client injects `Authorization: Bearer <token>`.
+
+**Server gateway** — `server/gateway.ts` (`PREMIUM_RPC_PATHS`):
+
+```ts
+const PREMIUM_RPC_PATHS = new Set([
+  '/api/market/v1/analyze-stock',
+  '/api/market/v1/get-stock-analysis-history',
+  '/api/market/v1/backtest-stock',
+  '/api/market/v1/list-stored-stock-backtests',
+  '/api/my-domain/v1/my-endpoint',  // <-- add here
+]);
+```
+
+The gateway verifies the bearer token against the JWKS, then reads the caller's
+Convex entitlement row. It returns 403 if the row does not clear the endpoint's
+required tier.
+
+### Currently Gated Panels
+
+| Panel | Variants | Gate type |
+|-------|----------|-----------|
+| `stock-analysis` | full, finance | `locked` (web) |
+| `stock-backtest` | full, finance | `locked` (web) |
+| `daily-market-brief` | full, finance | `locked` (web) |
+
+### Desktop Behavior
+
+Desktop users with a valid `WORLDMONITOR_API_KEY` in the Tauri keychain bypass all panel gating. The existing API key flow is unaffected — bearer tokens are a **second auth path**, not a replacement.
+
+---
+
+## Server-Side Session Enforcement
+
+The Cloudflare Worker gateway accepts two forms of authentication for premium endpoints:
+
+1. **Static API key** — `X-WorldMonitor-Key` header (existing flow, unchanged)
+2. **Bearer token** — `Authorization: Bearer <access_token>` (for web users)
+
+The gateway tries the API key first. If that fails on a premium endpoint, it
+falls back to bearer token validation via `server/auth-session.ts`. The JWT is
+verified against:
+
+- **Issuer**: `SUPABASE_JWT_ISSUER`
+- **Audience**: `authenticated` — Supabase stamps this fixed string on every access token
+- **Signature**: ES256 or RS256, against `<issuer>/.well-known/jwks.json`
+
+Symmetric algorithms are refused, because the JWKS publishes only public keys
+and admitting one would open the algorithm-confusion forgery.
+
+Non-premium endpoints don't require any authentication from web origins.
+
+---
+
+## Environment Variables
+
+| Variable | Where | Purpose |
+|----------|-------|---------|
+| `SUPABASE_JWT_ISSUER` | Convex + Worker | Issuer URL for JWT verification |
+| `VITE_SUPABASE_URL` | Client build | Supabase project URL |
+| `VITE_SUPABASE_ANON_KEY` | Client build | Supabase publishable anon key |
+
+---
+
+## User Roles
+
+Nothing in the token grants Pro. Supabase's only per-user token store is
+`user_metadata`, which its own docs call editable by the user without any
+checks, so `validateBearerToken` reports every verified session as `free` and
+never reads a plan claim. The Convex entitlement row is the sole answer, on the
+client exactly as on the server.
+
+On the client side, `getAuthState().user?.role` exposes the role. Both
+`isProUser()` and `hasPremiumAccess()` check this alongside the API key gates.

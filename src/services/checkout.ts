@@ -1,0 +1,957 @@
+/**
+ * Checkout orchestration service (vanilla TS dashboard).
+ *
+ * One flow, redirect mode (#4449): `startCheckout(productId)` creates a
+ * checkout session through the Convex createCheckout action, then navigates
+ * the top window to the provider's hosted page (`window.location.assign`).
+ * The buyer comes back to `/dashboard?wm_checkout=return`, which
+ * `handleCheckoutReturn` reads and reconciles (#4447).
+ *
+ * The Dodo overlay SDK that used to live here is gone. It had zero callers
+ * from the day redirect mode shipped -- the overlay iframe could not host
+ * Dodo's nested 3DS stack, so card payments hung at "Processing…" -- and it
+ * pinned a payment-provider SDK in the bundle and two provider hosts in the
+ * Permissions-Policy allowlist for no live path. Stripe Checkout is a
+ * top-level navigation, so nothing replaces it.
+ *
+ * UI code calls startCheckout(productId) -- everything else is internal.
+ */
+
+import { enqueueSentryCall } from '@/bootstrap/sentry-defer';
+import { openBillingPortal, prereserveBillingPortalTab } from './billing';
+import { getCurrentUser, getAuthToken, openSignIn } from './auth';
+import { subscribeAuthState } from './auth-state';
+import { saveCheckoutAttempt, clearCheckoutAttempt } from './checkout-attempt';
+import { safeHostedCheckoutUrl } from './provider-hosted-urls';
+import {
+  classifyHttpCheckoutError,
+  classifySyntheticCheckoutError,
+  classifyThrownCheckoutError,
+  parseCheckoutErrorBody,
+  parseCheckoutSuccessBody,
+  snapshotUpstreamBodyKeys,
+  snapshotUpstreamResponse,
+  UNUSABLE_SUCCESS_BODY_MESSAGE,
+  type CheckoutError,
+  type CheckoutErrorCode,
+  type UpstreamSnapshot,
+} from './checkout-errors';
+import { showCheckoutErrorToast } from './checkout-error-toast';
+import {
+  createDefaultCheckoutTransportDeps,
+  postCreateCheckout,
+} from './checkout-transport';
+import { runNoUserPath } from './checkout-no-user-policy';
+import { shouldSkipSentryForAction } from './checkout-sentry-policy';
+import { isEntitled, onEntitlementChange } from './entitlements';
+import {
+  CLASSIC_AUTO_DISMISS_MS,
+  EXTENDED_UNLOCK_TIMEOUT_MS,
+  maskEmail,
+  type CheckoutSuccessBannerState,
+} from './checkout-banner-state';
+import { loadActiveReferral } from './referral-capture';
+import { trackCheckoutStart } from './analytics';
+import { showDuplicateSubscriptionDialog } from './checkout-duplicate-dialog';
+import { showCheckoutPendingDialog } from './checkout-pending-dialog';
+import { resolvePlanDisplayName } from './checkout-plan-names';
+import { buildDashboardCheckoutReturnUrl } from './checkout-return-url';
+import { saveAnonClaimToken } from './anonymous-identity-storage';
+import { DASHBOARD_URL, PRO_URL } from '@/config/site';
+
+export {
+  EXTENDED_UNLOCK_TIMEOUT_MS,
+  maskEmail,
+  type CheckoutSuccessBannerState,
+} from './checkout-banner-state';
+
+export {
+  saveCheckoutAttempt,
+  loadCheckoutAttempt,
+  clearCheckoutAttempt,
+  type CheckoutAttempt,
+  type CheckoutAttemptClearReason,
+} from './checkout-attempt';
+
+const CHECKOUT_PRODUCT_PARAM = 'checkoutProduct';
+const CHECKOUT_REFERRAL_PARAM = 'checkoutReferral';
+const CHECKOUT_DISCOUNT_PARAM = 'checkoutDiscount';
+const PENDING_CHECKOUT_KEY = 'wm-pending-checkout';
+const APP_CHECKOUT_BASE_URL = DASHBOARD_URL;
+
+interface PendingCheckoutIntent {
+  productId: string;
+  referralCode?: string;
+  discountCode?: string;
+  /**
+   * User id who saved this intent, or null if saved anonymously (the
+   * common "click Buy, get sign-in modal" path). On resume, we only
+   * fire the auto-checkout if:
+   *   - savedByUserId === current user id (mid-flow redirect return), OR
+   *   - savedByUserId === null AND current user is authenticated
+   *     (anonymous intent → user just signed up/in — THIS IS the
+   *     auto-resume case)
+   * Anything else (A saved, B is now signed in) is a cross-user leak
+   * and the intent is discarded.
+   */
+  savedByUserId?: string | null;
+  /**
+   * Unix-ms when this intent was saved. Stale intents (closed Clerk
+   * modal without signing in, then hours later another sign-in for
+   * unrelated reasons) must not auto-resume checkout — the user's
+   * intent to buy has expired. Loaders apply PENDING_INTENT_TTL_MS
+   * and discard anything older.
+   */
+  savedAt?: number;
+}
+
+/**
+ * Max age of a saved pending-checkout intent before auto-resume is
+ * suppressed. 15 minutes covers a typical sign-in round-trip (read
+ * the dialog, switch to password manager, go through verification)
+ * without leaking into the "unrelated sign-in much later" case that
+ * previously fired a stale checkout. Matches the "user walked away
+ * from the flow" threshold — longer than that and we treat a later
+ * sign-in as unrelated.
+ */
+const PENDING_INTENT_TTL_MS = 15 * 60 * 1000;
+
+let _watchersInitialized = false;
+
+function loadPendingCheckoutIntent(): PendingCheckoutIntent | null {
+  try {
+    const raw = sessionStorage.getItem(PENDING_CHECKOUT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PendingCheckoutIntent;
+    // TTL gate: reject-and-clear anything older than PENDING_INTENT_TTL_MS.
+    // Covers the "user closed Clerk modal without signing in, signed in
+    // hours later for an unrelated reason" leak. No savedAt means it's
+    // a pre-TTL intent from a prior session — treat as expired too.
+    if (typeof parsed.savedAt !== 'number' || Date.now() - parsed.savedAt > PENDING_INTENT_TTL_MS) {
+      clearPendingCheckoutIntent();
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function savePendingCheckoutIntent(intent: PendingCheckoutIntent): void {
+  try {
+    // Stamp savedAt at write time so the TTL gate in the loader has
+    // something to check. Caller's own savedAt (if any) is preserved
+    // in case they want to record an earlier timestamp.
+    const stamped: PendingCheckoutIntent = {
+      ...intent,
+      savedAt: intent.savedAt ?? Date.now(),
+    };
+    sessionStorage.setItem(PENDING_CHECKOUT_KEY, JSON.stringify(stamped));
+  } catch {
+    // Ignore storage failures; the current page load still has the URL params.
+  }
+}
+
+function clearPendingCheckoutIntent(): void {
+  try {
+    sessionStorage.removeItem(PENDING_CHECKOUT_KEY);
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+/**
+ * Wire lifecycle watchers that need to fire outside the direct
+ * startCheckout() call path. Idempotent.
+ *
+ * Clears per-session checkout state on ANY user-id change:
+ *   - null → user (sign-in): nothing to clear, but initialize baseline.
+ *   - user → null (sign-out): wipe state so the next user doesn't
+ *     inherit it.
+ *   - userA → userB (account switch, Clerk session swap, SSO
+ *     re-attribution): also wipe — accidentally showing user B a retry
+ *     button for user A's failed Pro checkout is worse than losing
+ *     retry context.
+ *
+ * The `auth-state` subscription fires immediately with the current
+ * session on subscribe, so we track the previously-observed id to
+ * distinguish real transitions from the initial snapshot.
+ */
+export function initCheckoutWatchers(): void {
+  if (_watchersInitialized) return;
+  _watchersInitialized = true;
+
+  let _lastUserId: string | null = null;
+  let _initialized = false;
+  subscribeAuthState((state) => {
+    const nextId = state.user?.id ?? null;
+    if (!_initialized) {
+      _initialized = true;
+      _lastUserId = nextId;
+      // Defensive sweep on first snapshot: if the tab loads signed-out,
+      // there's no legitimate owner for any prior checkout state — wipe
+      // pending/post-checkout/attempt so a stale marker from a previous
+      // user (closed tab, session expiry, account switch before reload)
+      // can't leak into the next signed-in user's session. Signed-in
+      // loads preserve state because that user may be returning from a
+      // checkout redirect mid-flow.
+      if (nextId === null) {
+        clearCheckoutAttempt('signout');
+        clearPendingCheckoutIntent();
+      }
+      return;
+    }
+    if (nextId !== _lastUserId) {
+      const isSignIn = _lastUserId === null && nextId !== null;
+      if (isSignIn) {
+        // null→user transition is a sign-IN, NOT a sign-OUT. The whole
+        // point of pending/attempt state is to survive a sign-in so the
+        // post-auth auto-resume listener can fire the deferred checkout.
+        // Clearing here would race the resume listener and kill the
+        // flow — reviewer flagged this as a subscriber-order bug.
+        // Do NOT clear pending / post-checkout on sign-in.
+      } else {
+        // Everything else — sign-out, account switch (A→B), session
+        // rotation — must wipe all checkout state so the next user
+        // never inherits the previous user's intent/flag/attempt.
+        clearCheckoutAttempt('signout');
+        clearPendingCheckoutIntent();
+      }
+    }
+    _lastUserId = nextId;
+  });
+}
+
+export function buildCheckoutLaunchUrl(
+  productId: string,
+  options?: { referralCode?: string; discountCode?: string },
+): string {
+  const url = new URL(APP_CHECKOUT_BASE_URL);
+  url.searchParams.set(CHECKOUT_PRODUCT_PARAM, productId);
+  if (options?.referralCode) {
+    url.searchParams.set(CHECKOUT_REFERRAL_PARAM, options.referralCode);
+  }
+  if (options?.discountCode) {
+    url.searchParams.set(CHECKOUT_DISCOUNT_PARAM, options.discountCode);
+  }
+  return url.toString();
+}
+
+export function capturePendingCheckoutIntentFromUrl(): PendingCheckoutIntent | null {
+  const url = new URL(window.location.href);
+  const productId = url.searchParams.get(CHECKOUT_PRODUCT_PARAM);
+  if (!productId) return null;
+
+  console.log(`[checkout] Captured intent from URL: product=${productId}`);
+
+  const intent: PendingCheckoutIntent = {
+    productId,
+    referralCode: url.searchParams.get(CHECKOUT_REFERRAL_PARAM) ?? undefined,
+    discountCode: url.searchParams.get(CHECKOUT_DISCOUNT_PARAM) ?? undefined,
+    // Stamp the owning user id at save time so a later load in the
+    // same tab by a different user can discard this intent instead of
+    // auto-resuming it. null = saved anonymously (the click-sign-in
+    // flow), which is fair game for the first signed-in user.
+    savedByUserId: getCurrentUser()?.id ?? null,
+  };
+  savePendingCheckoutIntent(intent);
+  // /pro-origin intent captured here also populates the failure-retry
+  // record so a decline on this session's checkout can retry cross-origin.
+  saveCheckoutAttempt({
+    productId,
+    referralCode: intent.referralCode,
+    discountCode: intent.discountCode,
+    startedAt: Date.now(),
+  });
+
+  url.searchParams.delete(CHECKOUT_PRODUCT_PARAM);
+  url.searchParams.delete(CHECKOUT_REFERRAL_PARAM);
+  url.searchParams.delete(CHECKOUT_DISCOUNT_PARAM);
+  const cleanUrl = url.pathname + (url.searchParams.toString() ? `?${url.searchParams.toString()}` : '') + url.hash;
+  window.history.replaceState({}, '', cleanUrl);
+
+  return intent;
+}
+
+export async function resumePendingCheckout(options?: {
+  openAuth?: () => void;
+}): Promise<boolean> {
+  const intent = loadPendingCheckoutIntent();
+  if (!intent) {
+    console.log('[checkout] resumePendingCheckout: no pending intent');
+    return false;
+  }
+
+  const authUser = getCurrentUser();
+  console.log(`[checkout] resumePendingCheckout: intent=${intent.productId}, authUser=${authUser?.id ?? 'null'}, savedBy=${intent.savedByUserId ?? 'anon'}, hasOpenAuth=${!!options?.openAuth}`);
+
+  if (!authUser?.id) {
+    console.log('[checkout] resumePendingCheckout: no signed-in user, opening auth');
+    options?.openAuth?.();
+    return false;
+  }
+
+  // Cross-user leak guard: drop the intent if it was saved by a
+  // different signed-in user. Anonymous saves (savedByUserId === null
+  // OR missing for legacy intents pre-fix) are fair game for the
+  // now-signed-in user — that's the auto-resume case.
+  const savedBy = intent.savedByUserId;
+  if (savedBy != null && savedBy !== authUser.id) {
+    console.log('[checkout] resumePendingCheckout: intent belongs to different user, discarding');
+    clearPendingCheckoutIntent();
+    return false;
+  }
+
+  console.log(`[checkout] resumePendingCheckout: starting checkout for ${intent.productId}`);
+  const success = await startCheckout(
+    intent.productId,
+    {
+      referralCode: intent.referralCode,
+      discountCode: intent.discountCode,
+    },
+    { fallbackToPricingPage: false, analyticsSurface: 'dashboard-resume' },
+  );
+  if (success) clearPendingCheckoutIntent();
+  return success;
+}
+
+let _checkoutInFlight = false;
+let _checkoutRateLimitedUntilMs = 0;
+
+function checkoutRateLimitRemainingSeconds(): number {
+  return Math.max(0, Math.ceil((_checkoutRateLimitedUntilMs - Date.now()) / 1000));
+}
+
+/**
+ * High-level checkout entry point for UI code.
+ *
+ * Creates a checkout session via the /api/create-checkout edge endpoint
+ * (which relays to Convex). Returns true if the overlay opened successfully.
+ * Falls back to /pro page on any failure.
+ */
+export async function startCheckout(
+  productId: string,
+  options?: { discountCode?: string; referralCode?: string; bypassPendingGuard?: boolean },
+  behavior?: { fallbackToPricingPage?: boolean; analyticsSurface?: 'dashboard' | 'dashboard-resume' },
+): Promise<boolean> {
+  if (_checkoutInFlight) return false;
+  const fallbackToPricingPage = behavior?.fallbackToPricingPage ?? true;
+
+  const user = getCurrentUser();
+  // Funnel (#4931): every dashboard upgrade CTA routes through here, so one
+  // call site covers them all. Fires before the no-user branch so signed-out
+  // intent clicks are counted (flagged authed:false). The post-sign-in
+  // auto-resume passes 'dashboard-resume' so a signed-out conversion isn't
+  // read as two independent attempts.
+  trackCheckoutStart(productId, Boolean(user), behavior?.analyticsSurface ?? 'dashboard');
+  if (!user) {
+    const intent = {
+      productId,
+      referralCode: options?.referralCode,
+      discountCode: options?.discountCode,
+    };
+    reportCheckoutError(
+      classifySyntheticCheckoutError('unauthorized'),
+      { productId, action: 'no-user' },
+    );
+    // Both the decision AND the effect sequencing live in
+    // checkout-no-user-policy.ts, exercised in
+    // tests/checkout-no-user-policy.test.mts against a recording double.
+    // The contract: redirect path MUST NOT write sessionStorage (would
+    // create a stale dashboard intent that a later unrelated sign-in
+    // would auto-resume); inline path MUST write BEFORE openSignIn so the
+    // post-auth Clerk listener can resume the exact checkout. Keeping that
+    // ordering in the policy module (not this if/else) is deliberate —
+    // #5380-High-3 proved a source-grep guard over this file stays green
+    // with either contract violated.
+    runNoUserPath(fallbackToPricingPage, {
+      navigate: (url) => window.location.assign(url),
+      persistIntent: () => savePendingCheckoutIntent(intent),
+      persistAttempt: () => saveCheckoutAttempt({ ...intent, startedAt: Date.now() }),
+      openSignIn: () => openSignIn(),
+    });
+    return false;
+  }
+
+  const cooldownSeconds = checkoutRateLimitRemainingSeconds();
+  if (cooldownSeconds > 0) {
+    // A prior 429 already told this browser when it may try again. Keep
+    // repeated CTA clicks local during that window instead of recreating the
+    // provider request amplification this rate-limit path is meant to stop.
+    const error = classifyHttpCheckoutError(
+      429,
+      { error: 'CHECKOUT_RATE_LIMITED' },
+      String(cooldownSeconds),
+    );
+    showCheckoutErrorToast(error.userMessage);
+    return false;
+  }
+
+  _checkoutInFlight = true;
+  // Fall back to the stored referral when the caller doesn't pass one.
+  // A dashboard-origin upgrade click has no ref in hand — it arrives
+  // from a locked-panel CTA or the Manage Billing surface — but the
+  // visitor may have landed on /pro via `?ref=<code>` earlier in this
+  // session or within the 7-day TTL on another tab. loadActiveReferral
+  // returns null (and clears) on stale records, so this is safe to
+  // call unconditionally.
+  const effectiveReferral = options?.referralCode ?? loadActiveReferral() ?? undefined;
+  // Record the attempt BEFORE the network call so the failure-retry
+  // banner has context even if every subsequent step fails (timeout,
+  // user closes tab before Dodo redirects, SDK crashes, etc.).
+  saveCheckoutAttempt({
+    productId,
+    referralCode: effectiveReferral,
+    discountCode: options?.discountCode,
+    startedAt: Date.now(),
+  });
+  try {
+    let token = await getAuthToken();
+    if (!token) {
+      await new Promise((r) => setTimeout(r, 2000));
+      token = await getAuthToken();
+    }
+    if (!token) {
+      const error = classifySyntheticCheckoutError('session_expired');
+      reportCheckoutError(error, { productId, action: 'no-token' });
+      renderCheckoutErrorSurface(error, fallbackToPricingPage);
+      return false;
+    }
+
+    // Transient CF/origin 502s on this POST are retried once with an
+    // Idempotency-Key (server dedupes replays — api/_idempotency.ts).
+    // WORLDMONITOR-Q4: without this, every transient was a lost checkout.
+    const resp = await postCreateCheckout(createDefaultCheckoutTransportDeps(), {
+      url: '/api/create-checkout',
+      token,
+      payload: {
+        productId,
+        returnUrl: buildDashboardCheckoutReturnUrl(window.location.origin),
+        discountCode: options?.discountCode,
+        referralCode: effectiveReferral,
+        // #4438: only set when the user confirmed "start a new checkout anyway"
+        // from the pending-payment dialog. Skips the backend pending guard.
+        ...(options?.bypassPendingGuard ? { bypassPendingGuard: true } : {}),
+      },
+    });
+
+    if (!resp.ok) {
+      // Read body as text FIRST so we can both snapshot it for Sentry
+      // (Cloudflare / Vercel deployment-protection 403s are HTML, not
+      // JSON — the old `resp.json().catch(() => ({}))` swallowed the
+      // smoking-gun page) AND still attempt structured-body parsing
+      // for our own JSON error envelopes. WORLDMONITOR-RN.
+      const rawText = await resp.text().catch(() => '');
+      const upstream = snapshotUpstreamResponse(resp, rawText);
+      // parseCheckoutErrorBody returns {} for invalid JSON AND for valid
+      // JSON that isn't a plain object (null / array / primitive), making
+      // the implicit "body is CheckoutErrorBody-shaped" contract true at
+      // runtime — defensive against future consumers that don't add their
+      // own optional chaining. Greptile P2 review of PR #3894.
+      const body = parseCheckoutErrorBody(rawText);
+      const error = classifyHttpCheckoutError(
+        resp.status,
+        body,
+        resp.headers.get('Retry-After'),
+      );
+      if (error.code === 'rate_limited' && error.retryAfterSeconds !== undefined) {
+        _checkoutRateLimitedUntilMs = Date.now() + error.retryAfterSeconds * 1000;
+      }
+      reportCheckoutError(error, { productId, action: 'http-error' }, undefined, upstream);
+      // 409 duplicate-subscription — confirm with the user BEFORE
+      // navigating to the billing portal. Previously the portal opened
+      // silently in a new tab, which was disorienting for users who
+      // didn't know they already had a subscription. Dialog content
+      // uses only the whitelisted plan name (NEVER the raw server
+      // `message` or `displayName` string) per PR-3's taxonomy rule.
+      if (error.code === 'duplicate_subscription') {
+        clearPendingCheckoutIntent();
+        clearCheckoutAttempt('duplicate');
+        const planKey = body?.subscription?.planKey;
+        const planDisplayName = resolvePlanDisplayName(planKey);
+        showDuplicateSubscriptionDialog({
+          planDisplayName,
+          onConfirm: () => {
+            // Pre-reserve the tab SYNCHRONOUSLY in the click handler
+            // before the async work; popup blockers otherwise suppress
+            // the window.open that would land inside openBillingPortal
+            // after the Convex action round-trip. /pro side was fixed
+            // in this PR; the main-app dashboard path needs the same
+            // fix.
+            const reservedWin = prereserveBillingPortalTab();
+            void openBillingPortal(reservedWin);
+          },
+          onDismiss: () => { /* user stays on the dashboard */ },
+        });
+        return false;
+      }
+      // 409 payment-in-progress (#4438) — a recent same-tier 3DS payment is
+      // still pending. Confirm BEFORE starting a duplicate: the pending one may
+      // still be completing. Do NOT clear the attempt (the flow is recoverable —
+      // unlike the duplicate-subscription path). On confirm, re-invoke with
+      // bypassPendingGuard so the backend skips this guard and the redirect
+      // proceeds. Dialog content uses only the whitelisted plan name.
+      if (error.code === 'payment_in_progress') {
+        const pendingPlanKey = body?.pendingPayment?.planKey;
+        const planDisplayName = resolvePlanDisplayName(pendingPlanKey);
+        showCheckoutPendingDialog({
+          planDisplayName,
+          onConfirm: () => {
+            void startCheckout(
+              productId,
+              { ...options, bypassPendingGuard: true },
+              behavior,
+            );
+          },
+          onDismiss: () => { /* user stays put; pending payment may still complete */ },
+        });
+        return false;
+      }
+      // 401 from /api/create-checkout means the Clerk session we sent
+      // is invalid or expired. A toast alone is a dead end — the user
+      // needs to re-auth to retry. Save the intent and reopen sign-in
+      // inline so the post-auth Clerk listener can auto-resume the
+      // exact checkout without manual re-click.
+      //
+      // 403 is intentionally NOT routed here. Neither api/create-checkout.ts
+      // nor the Convex /relay/create-checkout handler ever emits 403 —
+      // observed 403s on this route originate above our function
+      // (Cloudflare Bot Fight Mode on datacenter IPs, Vercel Deployment
+      // Protection, a client-side proxy/extension, etc.). 403 maps to
+      // service_unavailable + retryable=true in the classifier so the
+      // user sees retry-friendly copy; reopening sign-in wouldn't help.
+      // The `upstream` snapshot captured above identifies which layer
+      // emitted it (WORLDMONITOR-RN).
+      if (error.code === 'unauthorized' || error.code === 'session_expired') {
+        savePendingCheckoutIntent({
+          productId,
+          referralCode: options?.referralCode,
+          discountCode: options?.discountCode,
+        });
+        openSignIn();
+        return false;
+      }
+      renderCheckoutErrorSurface(error, fallbackToPricingPage);
+      return false;
+    }
+
+    // Read the success body as TEXT first, for the same reason the !ok
+    // branch above does: a 200 whose body is not valid JSON (edge
+    // interstitial, empty payload, mid-transit truncation) made the old
+    // bare `resp.json()` throw an engine-specific DOMException — Safari's
+    // is `SyntaxError: The string did not match the expected pattern.` —
+    // which skipped the contract-violation reporter below, discarded the
+    // upstream snapshot that would name the emitter, and split one bug
+    // across a Sentry fingerprint per browser engine. WORLDMONITOR-XV.
+    // Let body-stream failures reach the outer exception path. Replacing a
+    // rejected read with an empty string discards the original error, stack,
+    // and cause, and falsely reports that the server sent an empty body.
+    const rawSuccessText = await resp.text();
+    const parsedSuccess = parseCheckoutSuccessBody(rawSuccessText);
+    if (parsedSuccess.kind !== 'object') {
+      // A 200 we cannot use is a different contract violation from a
+      // well-formed payload missing checkout_url below: it points at
+      // transport corruption or a middlebox rather than a relay payload
+      // bug, so it carries its own action tag. The upstream snapshot is
+      // what makes the next one self-diagnosing — it says whether the
+      // body was HTML, empty, or truncated, and which layer emitted it.
+      const unparsableBodyError: CheckoutError = {
+        code: 'service_unavailable',
+        userMessage: 'Checkout is temporarily unavailable. Please try again in a moment.',
+        serverMessage: UNUSABLE_SUCCESS_BODY_MESSAGE[parsedSuccess.kind],
+        httpStatus: resp.status,
+        retryable: true,
+      };
+      reportCheckoutError(
+        unparsableBodyError,
+        { productId, action: 'unparsable-success-body' },
+        undefined,
+        snapshotUpstreamResponse(resp, rawSuccessText),
+      );
+      renderCheckoutErrorSurface(unparsableBodyError, fallbackToPricingPage);
+      return false;
+    }
+    const result = parsedSuccess.body;
+    if (typeof result.anonymous_claim_token === 'string' && result.anonymous_claim_token.length > 0) {
+      saveAnonClaimToken(result.anonymous_claim_token);
+    }
+    // #4449: navigate the top window to the provider's hosted checkout page.
+    // An overlay iframe cannot host a nested 3DS/fraud stack — our
+    // Permissions-Policy and the SDK's own iframe `allow` attribute block the
+    // device sensors it needs two frames deep, so card payments requiring 3DS
+    // hung forever at "Processing…" (HAR-confirmed — see #4449/#4450). Top
+    // level, 3DS runs unconstrained, and #4447 returns the customer to
+    // /dashboard?wm_checkout=return to reconcile.
+    const hostedCheckoutUrl = safeHostedCheckoutUrl(result.checkout_url);
+    if (hostedCheckoutUrl) {
+      window.location.assign(hostedCheckoutUrl);
+      return true;
+    }
+    // 200 OK but no usable checkout_url — missing, or an untrusted/unparseable
+    // origin rejected by safeHostedCheckoutUrl — is a server contract violation
+    // (the edge relayer returned success but the payload is unusable). Used
+    // to silently `return false` — the user saw nothing happen and the
+    // bug was invisible in Sentry. Classify as service_unavailable
+    // (closest accurate user-facing copy) and tag action so engineers
+    // can filter this specific contract violation in Sentry. httpStatus
+    // stays 200 — we want the actual status the server returned, not a
+    // synthetic 5xx that would mask the real anomaly.
+    const missingUrlError: CheckoutError = {
+      code: 'service_unavailable',
+      userMessage: 'Checkout is temporarily unavailable. Please try again in a moment.',
+      serverMessage: 'Server returned 200 without a usable checkout_url',
+      httpStatus: resp.status,
+      retryable: true,
+    };
+    reportCheckoutError(
+      missingUrlError,
+      { productId, action: 'missing-checkout-url' },
+      undefined,
+      // Names the emitter (cf-ray / server / x-vercel-id) and the payload's
+      // KEY NAMES — "had session_id, no checkout_url" is the whole finding
+      // here, so values are withheld. The payload is a wholesale spread of
+      // the Dodo SDK's response, whose field set we do not control, and a
+      // redaction deny-list would silently outrun any schema change.
+      snapshotUpstreamBodyKeys(resp, result),
+    );
+    renderCheckoutErrorSurface(missingUrlError, fallbackToPricingPage);
+    return false;
+  } catch (err) {
+    const error = classifyThrownCheckoutError(err);
+    reportCheckoutError(error, { productId, action: 'exception' }, err);
+    renderCheckoutErrorSurface(error, fallbackToPricingPage);
+    return false;
+  } finally {
+    _checkoutInFlight = false;
+  }
+}
+
+/**
+ * Capture a checkout error to Sentry with structured context. Raw
+ * server-generated text is attached as `extra.serverMessage` — never
+ * surfaces to the user.
+ *
+ * Unauthorized / session_expired are *expected* user states (nobody
+ * signed in yet, Clerk session aged out) rather than engineering
+ * failures. duplicate_subscription is also expected when an existing
+ * Pro user clicks checkout again and should route to billing instead.
+ * Capture them at `info` so the funnel is still observable without
+ * triggering alerts. Everything else stays at `error`.
+ */
+export type SentryLevel = 'error' | 'info';
+const INFO_LEVEL_CODES: ReadonlySet<CheckoutErrorCode> = new Set([
+  'unauthorized',
+  'session_expired',
+  'duplicate_subscription',
+  'rate_limited',
+]);
+
+export function checkoutErrorTelemetryLevel(error: Pick<CheckoutError, 'code'>): SentryLevel {
+  return INFO_LEVEL_CODES.has(error.code) ? 'info' : 'error';
+}
+
+function reportCheckoutError(
+  error: CheckoutError,
+  context: { productId: string; action: string },
+  caught?: unknown,
+  upstream?: UpstreamSnapshot,
+): void {
+  const level = checkoutErrorTelemetryLevel(error);
+  const payload = {
+    level,
+    tags: {
+      component: 'dodo-checkout',
+      action: context.action,
+      code: error.code,
+      // Promote cf-ray and server to tags so they're filterable in the
+      // Sentry UI without opening the event. cf-ray presence alone is
+      // definitive for Cloudflare emission. WORLDMONITOR-RN.
+      ...(upstream?.cfRay ? { cfRay: upstream.cfRay } : {}),
+      ...(upstream?.server ? { upstreamServer: upstream.server } : {}),
+    },
+    extra: {
+      productId: context.productId,
+      httpStatus: error.httpStatus,
+      serverMessage: error.serverMessage,
+      retryAfterSeconds: error.retryAfterSeconds,
+      ...(upstream ? { upstream } : {}),
+    },
+  };
+  if (!shouldSkipSentryForAction(context.action)) {
+    if (caught) {
+      enqueueSentryCall((s) => s.captureException(caught, payload));
+    } else {
+      enqueueSentryCall((s) => s.captureMessage(`Checkout error: ${error.code}`, payload));
+    }
+  }
+  const logger = level === 'info' ? console.info : console.error;
+  logger(
+    `[checkout] ${error.code}${error.httpStatus ? ` (HTTP ${error.httpStatus})` : ''}`,
+    error.serverMessage ?? '',
+  );
+}
+
+/**
+ * Render the appropriate user-facing surface for a checkout error.
+ *
+ * `fallbackToPricingPage` semantics:
+ *   - true  → same-tab navigate to `/pro` so the user lands on the
+ *             marketing pricing page (used by in-product upsells that
+ *             expect to route users away from the dashboard).
+ *   - false → inline toast only (default for dashboard-origin retries
+ *             and resumePendingCheckout).
+ *
+ * Never uses `window.open(..., '_blank')` anymore — the stranded new
+ * tab pattern was the failure mode this PR closes.
+ */
+function renderCheckoutErrorSurface(
+  error: CheckoutError,
+  fallbackToPricingPage: boolean,
+): void {
+  // A 429 already carries a safe local recovery path. Keep the user on the
+  // current surface so the message and in-memory cooldown remain active
+  // instead of redirecting them to /pro and discarding the wait contract.
+  if (error.code === 'rate_limited') {
+    showCheckoutErrorToast(error.userMessage);
+    return;
+  }
+  if (fallbackToPricingPage) {
+    window.location.assign(PRO_URL);
+    return;
+  }
+  showCheckoutErrorToast(error.userMessage);
+}
+
+/**
+ * Show the post-checkout success banner.
+ *
+ * Classic mode (no `waitForEntitlement`): renders "Payment received! ..."
+ * and auto-dismisses after 5s. Used when entitlement unlock is a
+ * synchronous consequence of the current page load (e.g., the overlay
+ * handler firing pre-reload) or when the caller does not own the
+ * entitlement lifecycle.
+ *
+ * Extended-unlock mode (`waitForEntitlement: true`): stays mounted and
+ * transitions through three states that are observable via the
+ * `data-entitlement-state` attribute:
+ *   - `pending` (initial): "Payment received! Unlocking..."
+ *   - `active`: "Premium activated — reloading..." (set either on
+ *               mount when already entitled, or when the entitlement
+ *               watcher fires free→pro). Lets the watcher trigger the
+ *               actual reload so the banner persists across it.
+ *   - `timeout`: after 30s with no transition, swap to an explicit
+ *               "Refresh if features haven't unlocked" CTA + Sentry
+ *               warning. Never silently disappears.
+ */
+// Module-scoped cleanup for the currently-mounted success banner.
+// When `showCheckoutSuccess` is called a second time before the first
+// resolves (e.g., Dodo has historically double-fired checkout.status
+// — see docs/plans/2026-04-18-001-fix-pro-activation-race-*), this
+// tears down the prior banner's entitlement subscription + timeout
+// before mounting the new one. Without this, the prior `onEntitlementChange`
+// listener stays in the Set with a closure over a detached DOM node,
+// firing on every future entitlement update for the page lifetime.
+let _currentBannerCleanup: (() => void) | null = null;
+
+export function showCheckoutSuccess(
+  options?: { waitForEntitlement?: boolean; email?: string | null },
+): void {
+  _currentBannerCleanup?.();
+  _currentBannerCleanup = null;
+
+  const existing = document.getElementById('checkout-success-banner');
+  if (existing) existing.remove();
+
+  const banner = document.createElement('div');
+  banner.id = 'checkout-success-banner';
+  Object.assign(banner.style, {
+    position: 'fixed',
+    top: '0',
+    left: '0',
+    right: '0',
+    zIndex: '99999',
+    padding: '14px 20px',
+    background: 'linear-gradient(135deg, #16a34a, #22c55e)',
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: '14px',
+    textAlign: 'center',
+    boxShadow: '0 2px 12px rgba(0,0,0,0.3)',
+    transition: 'opacity 0.4s ease, transform 0.4s ease',
+    transform: 'translateY(-100%)',
+    opacity: '0',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '12px',
+  });
+
+  // Resolve email lazily. Clerk/auth-state is hydrated asynchronously
+  // in App bootstrap (src/App.ts) AFTER PanelLayoutManager mounts, so
+  // `getAuthState().user?.email` read synchronously at the call site
+  // is usually null on post-reload returns. Wrap the reference in a
+  // mutable container that later transitions can re-read, and
+  // subscribe to auth-state once to update the banner text when email
+  // hydrates.
+  let currentMaskedEmail = maskEmail(options?.email);
+  let unsubscribeAuth: (() => void) | null = null;
+  let emailPollInterval: ReturnType<typeof setInterval> | null = null;
+  let currentState: CheckoutSuccessBannerState = 'pending';
+
+  const applyEmail = (raw: string | null | undefined): boolean => {
+    const next = maskEmail(raw ?? null);
+    if (next && next !== currentMaskedEmail) {
+      currentMaskedEmail = next;
+      setBannerText(banner, currentState, currentMaskedEmail);
+      stopEmailWatchers();
+      return true;
+    }
+    return false;
+  };
+  const stopEmailWatchers = (): void => {
+    unsubscribeAuth?.();
+    unsubscribeAuth = null;
+    if (emailPollInterval) {
+      clearInterval(emailPollInterval);
+      emailPollInterval = null;
+    }
+  };
+
+  if (!currentMaskedEmail) {
+    // Two fallbacks needed. (1) subscribeAuthState should fire when Clerk
+    // hydrates — but auth-state.ts subscribes to clerkInstance at the
+    // moment subscribeAuthState is called; if showCheckoutSuccess runs
+    // BEFORE initAuth() resolves, clerkInstance is null and
+    // subscribeAuth returns a no-op unsubscribe. Nothing re-emits after
+    // Clerk hydrates. (2) Polling getCurrentUser() directly every
+    // 500ms catches the late hydration regardless of auth-state's
+    // subscription timing. Both stop as soon as we get a valid email.
+    unsubscribeAuth = subscribeAuthState((state) => {
+      applyEmail(state.user?.email);
+    });
+    const POLL_MS = 500;
+    const POLL_BUDGET_MS = 15_000;
+    const pollStart = Date.now();
+    emailPollInterval = setInterval(() => {
+      if (Date.now() - pollStart > POLL_BUDGET_MS) {
+        if (emailPollInterval) { clearInterval(emailPollInterval); emailPollInterval = null; }
+        return;
+      }
+      applyEmail(getCurrentUser()?.email);
+    }, POLL_MS);
+  }
+  setBannerText(banner, 'pending', currentMaskedEmail);
+  document.body.appendChild(banner);
+
+  requestAnimationFrame(() => {
+    banner.style.transform = 'translateY(0)';
+    banner.style.opacity = '1';
+  });
+
+  if (!options?.waitForEntitlement) {
+    setTimeout(() => {
+      stopEmailWatchers();
+      dismissBanner(banner);
+    }, CLASSIC_AUTO_DISMISS_MS);
+    return;
+  }
+
+  // If the user is already entitled when the banner fires (PR-4 merged
+  // the inline check — PR-3276's P1 #251 deleted the one-line
+  // computeInitialBannerState helper as an identity function, so the
+  // check is now direct). Auto-dismiss via CLASSIC_AUTO_DISMISS_MS
+  // (PR-4 fix for the fast-path hang). PR-11 adds email-banner +
+  // email-watcher cleanup so the stop callback doesn't leak into the
+  // tab's lifetime when this fast-path fires with a backfill sub active.
+  if (isEntitled()) {
+    currentState = 'active';
+    setBannerText(banner, 'active', currentMaskedEmail);
+    setTimeout(() => {
+      stopEmailWatchers();
+      dismissBanner(banner);
+    }, CLASSIC_AUTO_DISMISS_MS);
+    return;
+  }
+
+  let resolved = false;
+  const timeoutHandle = setTimeout(() => {
+    if (resolved) return;
+    resolved = true;
+    unsubscribe();
+    stopEmailWatchers();
+    _currentBannerCleanup = null;
+    currentState = 'timeout';
+    setBannerText(banner, 'timeout', currentMaskedEmail);
+    enqueueSentryCall((s) => s.captureMessage('Checkout entitlement-activation timeout', {
+      level: 'warning',
+      tags: { component: 'dodo-checkout', action: 'entitlement-timeout' },
+    }));
+  }, EXTENDED_UNLOCK_TIMEOUT_MS);
+
+  const unsubscribe = onEntitlementChange(() => {
+    if (resolved) return;
+    if (!isEntitled()) return;
+    resolved = true;
+    clearTimeout(timeoutHandle);
+    unsubscribe();
+    stopEmailWatchers();
+    _currentBannerCleanup = null;
+    currentState = 'active';
+    setBannerText(banner, 'active', currentMaskedEmail);
+  });
+
+  // Register cleanup so a re-entrant showCheckoutSuccess call (e.g. a
+  // double-fire of `checkout.status=succeeded`) tears down this
+  // banner's listener + timer before mounting a replacement.
+  _currentBannerCleanup = () => {
+    if (resolved) return;
+    resolved = true;
+    clearTimeout(timeoutHandle);
+    unsubscribe();
+  };
+}
+
+function setBannerText(
+  banner: HTMLElement,
+  state: CheckoutSuccessBannerState,
+  maskedEmail: string | null,
+): void {
+  banner.setAttribute('data-entitlement-state', state);
+  if (state === 'pending') {
+    banner.textContent = maskedEmail
+      ? `Payment received! Receipt sent to ${maskedEmail}. Unlocking your premium features…`
+      : 'Payment received! Unlocking your premium features…';
+    return;
+  }
+  if (state === 'active') {
+    banner.textContent = 'Premium activated — reloading…';
+    return;
+  }
+  // timeout
+  banner.innerHTML = '';
+  const text = document.createElement('span');
+  text.textContent = "Payment received. If features haven't unlocked, refresh the page.";
+  const refreshBtn = document.createElement('button');
+  refreshBtn.type = 'button';
+  refreshBtn.textContent = 'Refresh';
+  Object.assign(refreshBtn.style, {
+    background: '#fff',
+    color: '#16a34a',
+    border: 'none',
+    borderRadius: '4px',
+    padding: '4px 12px',
+    fontWeight: '600',
+    fontSize: '12px',
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+  });
+  refreshBtn.addEventListener('click', () => window.location.reload());
+  banner.appendChild(text);
+  banner.appendChild(refreshBtn);
+}
+
+function dismissBanner(banner: HTMLElement): void {
+  banner.style.transform = 'translateY(-100%)';
+  banner.style.opacity = '0';
+  setTimeout(() => banner.remove(), 400);
+}

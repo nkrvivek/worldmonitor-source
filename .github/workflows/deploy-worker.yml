@@ -1,0 +1,115 @@
+name: Deploy api-cors-preflight Worker
+
+# Deploys the Cloudflare Worker that owns CORS for api.worldmonitor.app.
+#
+# This fork does not own the worldmonitor.app zone, so the deploy and the live
+# smoke test cannot run here — wrangler.toml routes the Worker to
+# api.worldmonitor.app on zone worldmonitor.app, and our Cloudflare account
+# holds no such zone. Both jobs are therefore dispatch-only. Unit tests still
+# run on every push, so the Worker's CORS logic stays guarded; it is only the
+# publish step that this fork cannot perform. Remove the dispatch gate on the
+# day a zone we own carries the route.
+#
+# Required repo secrets (for a manual dispatch against a zone you own):
+#   CLOUDFLARE_API_TOKEN  — token scoped to Workers Scripts:Edit + Workers
+#                           Routes:Edit on that zone.
+#   CLOUDFLARE_ACCOUNT_ID — CF account that owns the Worker.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'workers/api-cors-preflight/**'
+      - 'api/_bootstrap-public-tier.js'
+      - '.github/workflows/deploy-worker.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workers/api-cors-preflight
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - name: Install
+        run: npm install --no-audit --no-fund
+      - name: Run unit tests
+        run: npm test
+
+  deploy:
+    name: Wrangler deploy
+    needs: unit-test
+    # Dispatch-only: see the zone note at the top of this file.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workers/api-cors-preflight
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - name: Install
+        run: npm install --no-audit --no-fund
+      # The KV shadow (BOOTSTRAP_KV_SHADOW=1) emits to Axiom; the Worker reads AXIOM_API_TOKEN
+      # as a secret. Set it before deploy. Absent secret => the shadow no-ops silently
+      # (warnDeliveryFailure 'missing_token'), never an error — so a missing secret can't
+      # break the CORS deploy.
+      - name: Set Axiom secret
+        # Must never gate the CORS deploy. A secret-put that fails (token lacks the
+        # Workers-secret scope, transient CF error) would otherwise fail the job and skip
+        # Deploy below — coupling the fragile CORS deploy to Axiom telemetry, the exact
+        # invariant this path promises not to break. On failure the shadow just no-ops
+        # (missing_token); the failure still surfaces in the job log.
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          AXIOM_API_TOKEN: ${{ secrets.AXIOM_API_TOKEN }}
+        run: |
+          if [ -n "$AXIOM_API_TOKEN" ]; then
+            printf '%s' "$AXIOM_API_TOKEN" | npx wrangler secret put AXIOM_API_TOKEN --config wrangler.toml
+          else
+            echo "AXIOM_API_TOKEN not set — KV shadow telemetry no-ops (measured silently)"
+          fi
+      - name: Deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        # --config is required. Without it wrangler walks up to the repo root
+        # and finds the app's wrangler.jsonc, which is written for wrangler 4
+        # while this Worker pins wrangler 3 — the mismatch fails the run with
+        # `"containers" should be an object, but got an array`.
+        run: npx wrangler deploy --config wrangler.toml
+
+  live-smoke:
+    name: Live preflight smoke test
+    needs: deploy
+    # Hits api.worldmonitor.app, a host this fork does not serve.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - name: Wait for Worker propagation
+        # Cloudflare documents Workers propagation to the global edge as up
+        # to ~30 s, occasionally longer. A 15 s wait races the in-flight
+        # propagation window and can either (a) false-green by smoke-testing
+        # the OLD Worker that's still serving at some PoPs, or (b) false-fail
+        # transiently. 30 s aligns with the documented propagation SLA.
+        run: sleep 30
+      - name: Smoke test live OPTIONS preflight
+        env:
+          LIVE_SMOKE: '1'
+        run: node --test tests/cors-preflight-live.test.mjs
