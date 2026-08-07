@@ -1,0 +1,30 @@
+# World Monitor Developer Portal
+
+> Section-scoped llms.txt for the developer surface — the MCP server, REST API, SDKs, CLI, sandbox, and agent skills that expose World Monitor's real-time global-intelligence data as structured JSON. Fetch this file instead of the site-wide briefing when the task is "build against or integrate World Monitor".
+
+All developer surfaces share one auth model (API key `X-WorldMonitor-Key: wm_<40-hex>` or OAuth 2.1 `scope=mcp`) and one tool inventory. Every surface returns source-attributed structured JSON and supports server-side JMESPath projection.
+
+## Build Surfaces
+
+- [MCP server](https://worldmonitor.sibt.ai/mcp): recommended agent surface — Streamable HTTP, JSON-RPC 2.0. `tools/list`, `prompts/list`, `resources/list`, and `describe_tool` are anonymous. Server card: https://worldmonitor.sibt.ai/.well-known/mcp/server-card.json
+- [REST API](https://worldmonitor.sibt.ai): OpenAPI 3.1 contract at https://worldmonitor.sibt.ai/openapi.yaml (JSON: https://worldmonitor.sibt.ai/openapi.json) · API catalog (RFC 9727): https://worldmonitor.sibt.ai/.well-known/api-catalog
+- [CLI](https://www.npmjs.com/package/worldmonitor): `npx worldmonitor tools` lists every tool with no key; `npm install -g worldmonitor` installs the command
+- [SDKs](https://worldmonitor.sibt.ai/sdks.md): Python `pip install worldmonitor-sdk` · Ruby `gem install worldmonitor` · Go `go get github.com/koala73/worldmonitor/sdk/go` · JavaScript (npm `worldmonitor`)
+- [Agent Skills](https://worldmonitor.sibt.ai/.well-known/agent-skills/index.json): installable skills manifest — `npx skills add koala73/worldmonitor`
+
+## Test Without a Key
+
+- [Sandbox](https://worldmonitor.sibt.ai/sandbox/index.json): deterministic, schema-valid sample responses for representative REST operations — no auth, no quota, safe for CI. Guide: https://worldmonitor.sibt.ai/docs/sandbox
+- Anonymous MCP discovery: `tools/list`, `describe_tool`, `prompts/list`, and `resources/list` are quota-exempt on the live server
+- The data API is read-only — there are no destructive data operations to guard against while testing
+
+## Auth, Limits, Support
+
+- [auth.md](https://worldmonitor.sibt.ai/auth.md): agent auth walkthrough — API keys and OAuth 2.1 with dynamic client registration; issue a key at https://worldmonitor.sibt.ai/pro
+- [pricing.md](https://worldmonitor.sibt.ai/pricing.md): machine-readable plans and limits · live catalog: https://worldmonitor.sibt.ai/api/product-catalog
+- [support.md](https://worldmonitor.sibt.ai/support.md): support channels
+
+## Related Section Files
+
+- [Site-wide llms.txt](https://worldmonitor.sibt.ai/llms.txt) · [API section](https://worldmonitor.sibt.ai/api/llms.txt) · [Docs section](https://worldmonitor.sibt.ai/docs/llms.txt) · [Blog section](https://worldmonitor.sibt.ai/blog/llms.txt)
+- [Developer portal (human)](https://worldmonitor.sibt.ai/developers.md) · [agents.md](https://worldmonitor.sibt.ai/agents.md)
