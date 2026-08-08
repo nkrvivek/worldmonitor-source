@@ -1,0 +1,93 @@
+name: Publish Source Mirror
+
+# AGPL-3.0-only section 13: anyone using a modified version over a network is
+# owed THAT modified source. worldmonitor.sibt.ai runs a heavily modified fork
+# — Supabase auth, Cloudflare Workers, Convex, our own seed rails — while this
+# repo stays private, so pointing users at upstream does not discharge the
+# offer. This job publishes the running tree to a public repo that does.
+#
+#   source of truth : nkrvivek/worldmonitor        (private, has history)
+#   the offer       : nkrvivek/worldmonitor-source (public, one commit)
+#
+# One orphan commit per push, not the history. Two reasons: a public history
+# can never be un-published, and the licence obliges us to offer the source of
+# what is running, not the path we took to it. The push is therefore always a
+# force-push onto a repo whose only content this job wrote — there is no other
+# history there to lose.
+#
+# .github/scripts/scan-source-mirror-secrets.mjs runs first and the job stops
+# on any finding. tests/source-mirror-secret-scan.test.mjs runs the same scan
+# over the same tree in the normal suite, so a committed key fails long before
+# it reaches here.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-mirror
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Scan the tracked tree for secrets
+        run: node .github/scripts/scan-source-mirror-secrets.mjs
+
+      - name: Push the tree as one orphan commit
+        env:
+          MIRROR_DEPLOY_KEY: ${{ secrets.MIRROR_DEPLOY_KEY }}
+          MIRROR_REPO: git@github.com:nkrvivek/worldmonitor-source.git
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${MIRROR_DEPLOY_KEY}" ]; then
+            echo "MIRROR_DEPLOY_KEY is not set — cannot publish the source offer" >&2
+            exit 1
+          fi
+
+          mkdir -p ~/.ssh
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          install -m 600 /dev/null ~/.ssh/mirror
+          printf '%s\n' "${MIRROR_DEPLOY_KEY}" > ~/.ssh/mirror
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/mirror -o IdentitiesOnly=yes"
+
+          SRC_SHA="$(git rev-parse HEAD)"
+          STAGE="$(mktemp -d)"
+          # git archive carries the tracked files and nothing else: no .git, no
+          # untracked build output, no local env files.
+          git archive HEAD | tar -x -C "${STAGE}"
+          cp .github/mirror/SOURCE-MIRROR.md "${STAGE}/SOURCE-MIRROR.md"
+
+          # GitHub renders README.md as the landing page, and this tree carries
+          # upstream's. A source offer nobody lands on is not an offer, so the
+          # mirror's README leads with the notice and keeps upstream's below it.
+          {
+            cat .github/mirror/SOURCE-MIRROR.md
+            printf '\n---\n\n'
+            cat README.md
+          } > "${STAGE}/README.md"
+
+          cd "${STAGE}"
+          git init -q -b main
+          git config user.name 'worldmonitor source mirror'
+          git config user.email 'hello@sibt.ai'
+          git add -A
+          git commit -q -m "Corresponding source for worldmonitor.sibt.ai (${SRC_SHA})"
+          git push --force "${MIRROR_REPO}" main
+
+          rm -f ~/.ssh/mirror

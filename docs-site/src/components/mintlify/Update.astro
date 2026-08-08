@@ -1,0 +1,37 @@
+---
+// Mintlify's <Update> — one release in the changelog. label is the version and
+// date, tags are the areas it touched. description repeats the version, so it
+// is not rendered.
+interface Props {
+  label: string;
+  description?: string;
+  tags?: string[];
+}
+const { label, tags = [] } = Astro.props;
+---
+<section class="update">
+  <h2 id={label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}>{label}</h2>
+  {tags.length > 0 && (
+    <p class="update-tags">{tags.map((tag) => <span class="update-tag">{tag}</span>)}</p>
+  )}
+  <slot />
+</section>
+
+<style>
+  .update {
+    border-top: 1px solid var(--sl-color-hairline);
+    padding-top: 1rem;
+    margin-top: 2rem;
+  }
+  .update-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+  .update-tag {
+    background: var(--sl-color-gray-6);
+    border-radius: 0.25rem;
+    font-size: var(--sl-text-xs);
+    padding: 0.1rem 0.5rem;
+  }
+</style>

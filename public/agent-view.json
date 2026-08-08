@@ -1,0 +1,120 @@
+{
+  "$comment": "Machine-readable homepage view served at /?mode=agent (vercel.json rewrite). Structured summary for AI agents instead of marketing HTML. Parity with the MCP server card and agent card is guarded in tests/agent-mode-view.test.mjs.",
+  "kind": "agent-view",
+  "product": "World Monitor",
+  "url": "https://worldmonitor.sibt.ai",
+  "description": "Live global-intelligence platform: real-time markets, conflict events, country risk and resilience, global procurement opportunities, shipping chokepoints, aviation/maritime activity, energy, climate, health, cyber threats, on-demand NLP utilities (classification, entity extraction, news clusters, keyword spikes), forecasts and AI-generated briefs — machine-readable JSON, correlated across layers.",
+  "endpoints": {
+    "mcp": {
+      "url": "https://worldmonitor.sibt.ai/mcp",
+      "transport": "streamable-http",
+      "serverCard": "https://worldmonitor.sibt.ai/.well-known/mcp/server-card.json",
+      "tools": 59,
+      "note": "tools/list, prompts/list, resources/list and describe_tool are anonymous; data calls need auth."
+    },
+    "rest": {
+      "base": "https://worldmonitor.sibt.ai",
+      "openapi": "https://worldmonitor.sibt.ai/openapi.json",
+      "note": "Send a descriptive User-Agent; generic UAs are filtered at the edge. Fetch the OpenAPI spec for the full operation list."
+    },
+    "a2a": {
+      "url": "https://worldmonitor.sibt.ai/a2a",
+      "agentCard": "https://worldmonitor.sibt.ai/.well-known/agent-card.json",
+      "note": "Anonymous concierge: message/send routes a natural-language need to the right tool."
+    },
+    "nlweb": {
+      "url": "https://worldmonitor.sibt.ai/ask",
+      "note": "POST {\"query\": \"...\"} → NLWeb JSON; prefer.streaming=true → SSE (start/result/complete)."
+    },
+    "cli": {
+      "package": "worldmonitor",
+      "install": "npm install -g worldmonitor",
+      "url": "https://www.npmjs.com/package/worldmonitor"
+    },
+    "sdks": {
+      "javascript": {
+        "install": "npm install worldmonitor",
+        "url": "https://www.npmjs.com/package/worldmonitor"
+      },
+      "python": {
+        "install": "pip install worldmonitor-sdk",
+        "url": "https://pypi.org/project/worldmonitor-sdk/"
+      },
+      "ruby": {
+        "install": "gem install worldmonitor",
+        "url": "https://rubygems.org/gems/worldmonitor"
+      },
+      "go": {
+        "install": "go get github.com/koala73/worldmonitor/sdk/go",
+        "url": "https://pkg.go.dev/github.com/koala73/worldmonitor/sdk/go"
+      },
+      "guide": "https://worldmonitor.sibt.ai/docs/sdks",
+      "note": "Zero-dependency SDK packages published by the upstream project. They default to api.worldmonitor.app; set WORLDMONITOR_BASE_URL=https://worldmonitor.sibt.ai and WORLDMONITOR_MCP_URL=https://worldmonitor.sibt.ai/mcp to call this instance."
+    },
+    "sandbox": {
+      "url": "https://worldmonitor.sibt.ai/sandbox/index.json",
+      "docs": "https://worldmonitor.sibt.ai/docs/sandbox",
+      "note": "Test environment: deterministic, schema-valid sample responses for representative REST operations — no auth, no quota, safe for CI. The data API is read-only, so live calls cannot mutate production data."
+    }
+  },
+  "quickstart": {
+    "sandbox": "curl https://worldmonitor.sibt.ai/sandbox/get-resilience-score.json",
+    "rest": "curl -H 'X-WorldMonitor-Key: wm_<40 hex>' 'https://worldmonitor.sibt.ai/api/resilience/v1/get-resilience-score?countryCode=DE'",
+    "mcp": "curl -X POST https://worldmonitor.sibt.ai/mcp -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}'"
+  },
+  "authentication": {
+    "summary": "Authentication: OAuth2 (scope=mcp) or an API key header. Discovery surfaces (tools/list, describe_tool, prompts/list, resources/list, /a2a, /ask) are anonymous — no authentication required.",
+    "oauth2": {
+      "authorizationServer": "https://worldmonitor.sibt.ai/.well-known/oauth-authorization-server",
+      "protectedResource": "https://worldmonitor.sibt.ai/.well-known/oauth-protected-resource",
+      "scope": "mcp"
+    },
+    "apiKey": {
+      "header": "X-WorldMonitor-Key",
+      "format": "wm_<40 hex>",
+      "issueAt": "https://worldmonitor.sibt.ai/pro"
+    },
+    "guide": "https://worldmonitor.sibt.ai/auth.md",
+    "plansAndLimits": "https://worldmonitor.sibt.ai/pricing.md"
+  },
+  "rateLimits": {
+    "anonymous": "60 requests/min per IP on public MCP methods, /a2a and /ask",
+    "authenticated": "per-plan daily quotas — see https://worldmonitor.sibt.ai/pricing.md"
+  },
+  "documentation": "https://worldmonitor.sibt.ai/docs/documentation",
+  "capabilities": [
+    "real-time market data (equities, commodities, crypto, FX)",
+    "global live conflict events and CII v8 scores for 31 Tier-1 countries",
+    "country resilience scores across the 196-country public rankable universe, with domain/pillar breakdown",
+    "13 shipping chokepoints with live AIS transit intelligence",
+    "maritime and aviation activity, airspace status",
+    "energy intelligence (LNG, pipelines, refineries, outages)",
+    "sanctions, supply-chain and tariff data",
+    "cyber threats, natural disasters, health and displacement signals",
+    "AI world/country briefs, scenario forecasts, prediction markets"
+  ],
+  "discovery": {
+    "llmsTxt": "https://worldmonitor.sibt.ai/llms.txt",
+    "llmsFullTxt": "https://worldmonitor.sibt.ai/llms-full.txt",
+    "sectionLlmsTxt": {
+      "api": "https://worldmonitor.sibt.ai/api/llms.txt",
+      "docs": "https://worldmonitor.sibt.ai/docs/llms.txt",
+      "developers": "https://worldmonitor.sibt.ai/developers/llms.txt",
+      "blog": "https://worldmonitor.sibt.ai/blog/llms.txt"
+    },
+    "schemamap": "https://worldmonitor.sibt.ai/schemamap.xml",
+    "markdownHomepage": "https://worldmonitor.sibt.ai/index.md",
+    "agentSkills": "https://worldmonitor.sibt.ai/.well-known/agent-skills/index.json",
+    "apiCatalog": "https://worldmonitor.sibt.ai/.well-known/api-catalog",
+    "aiCatalog": "https://worldmonitor.sibt.ai/.well-known/ai-catalog.json",
+    "docs": "https://worldmonitor.sibt.ai/docs/documentation"
+  },
+  "instances": {
+    "geopolitics": "https://worldmonitor.sibt.ai/dashboard",
+    "tech": "https://worldmonitor.sibt.ai/tech",
+    "finance": "https://worldmonitor.sibt.ai/finance",
+    "commodities": "https://worldmonitor.sibt.ai/commodity",
+    "positiveNews": "https://worldmonitor.sibt.ai/happy",
+    "energy": "https://worldmonitor.sibt.ai/energy"
+  }
+}

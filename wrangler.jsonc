@@ -1,0 +1,212 @@
+{
+  "name": "worldmonitor-web",
+  // Not worker/index.ts directly: that file is imported under a plain Node
+  // environment by tests/worker/index.test.mts, and a Durable Object's
+  // `cloudflare:workers` import would break that suite the instant it loaded.
+  // worker/entry.ts re-exports index.ts's fetch handler unchanged and adds
+  // the CounterDO export wrangler needs for the binding below.
+  "main": "./worker/entry.ts",
+  "compatibility_date": "2026-08-02",
+  "compatibility_flags": ["nodejs_compat"],
+  // Adding a custom-domain route disables workers.dev by default. Keep it on
+  // explicitly: worldmonitor-web.nkrvivek.workers.dev is the always-on
+  // fallback if the custom domain misbehaves.
+  "workers_dev": true,
+  // Task 6: a hostname we own, to prove the Worker end-to-end. Not production
+  // traffic — worldmonitor.app stays on Vercel via a zone we don't control.
+  // NOTE (fix round 2): removing this block and redeploying does NOT remove
+  // the Custom Domain or its DNS record — tested live, see Rollback in
+  // docs/deploy/cloudflare-cutover.md. Keep this comment in sync with that
+  // section.
+  "routes": [
+    { "pattern": "worldmonitor.sibt.ai", "custom_domain": true }
+  ],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    // The Worker owns routing: vercel.json puts the filesystem check before
+    // rewrites, which is the opposite of the Workers default.
+    "run_worker_first": true,
+    // A miss must return 404 so the Worker can fall through to the rewrite
+    // table. "single-page-application" here would serve the SPA for a missing
+    // /assets/*.js and make the catch-all's exclusion list meaningless.
+    "not_found_handling": "none",
+    // vercel.json sets neither cleanUrls nor trailingSlash.
+    "html_handling": "none"
+  },
+  "vars": {
+    // DNS-only record pointing at the Vercel project. Must not be
+    // www.worldmonitor.app — that becomes this Worker and the proxy would loop.
+    "UPSTREAM_API_ORIGIN": "https://vercel-origin.worldmonitor.app",
+    // Read by the CORS allowlists (api/_cors.js:16, server/cors.ts:30), which
+    // add http://localhost and http://127.0.0.1 to the allowed origins on
+    // anything other than "production". Nothing substitutes this at build time
+    // -- there is no esbuild `define` for it -- so without this line NODE_ENV
+    // is undefined on the deployed Worker and those localhost origins are live
+    // in production.
+    //
+    // Do not try to confirm this with `wrangler dev`: dev forces
+    // NODE_ENV=development and that beats the var, so a local preflight echoes
+    // http://localhost:3000 either way. Measured with a throwaway second var
+    // read back through a response header -- it came through as written, so
+    // vars do reach process.env under nodejs_compat; only NODE_ENV is
+    // overridden, and only in dev. Verify on the deployed Worker instead: a
+    // preflight carrying `Origin: http://localhost:3000` must come back 403
+    // with no CORS headers at all. Not a 204 echoing the localhost origin,
+    // and not the https://worldmonitor.app fallback either -- server/cors.ts's
+    // fallback never runs here, because isDisallowedOrigin
+    // (server/gateway.ts:774) answers first, before getCorsHeaders is called.
+    //
+    // One behaviour outside CORS moves with this var: isDevHeaderEnabled()
+    // (server/_shared/usage.ts:37) is `NODE_ENV !== 'production'`, so the
+    // x-usage-telemetry header the gateway used to attach to every deployed
+    // response now stops. That header was only ever meant for dev.
+    //
+    // Second dev-only trap seen while measuring: wrangler dev rewrites an
+    // incoming Origin header to its own http://localhost:PORT when the origin
+    // names a hostname in `routes` above, so an Origin of
+    // https://worldmonitor.sibt.ai arrives at the Worker as the dev address.
+    // That is the dev proxy, not this config.
+    "NODE_ENV": "production",
+    // Not a secret — only the name of the header the relay route reads. The
+    // secret value is RELAY_SHARED_SECRET, set with `wrangler secret put`,
+    // never here.
+    "RELAY_AUTH_HEADER": "x-relay-key",
+    // The cutover. getRelayBaseUrl() (server/_shared/relay.ts) had nothing to
+    // read, so every relay-backed handler skipped its relay call. It now names
+    // this Worker's own hostname, which serves /ais/snapshot from AisRelayDO.
+    //
+    // A Worker cannot fetch its own hostname: the subrequest goes out and
+    // times out rather than re-entering. Measured 2026-08-04 -- HTTP 522 from
+    // https://worldmonitor.sibt.ai/ais/snapshot while the Durable Object
+    // behind that path held 8,000 live vessels. So the maritime gateway does
+    // not use this URL to reach the relay; worker/routes/maritime.ts swaps in
+    // a fetcher that calls the Durable Object directly. What stays here is the
+    // base URL every other relay-backed handler reads.
+    //
+    // Only /ais/snapshot is ported. The old Node relay also served /telegram,
+    // /oref, /opensky, /google-flights, /yahoo-chart, /polymarket, /rss,
+    // /ucdp-events, /worldbank and /wingbits. Every relay call now goes through
+    // relayFetch -- server/_shared/relay.ts for the server handlers and
+    // api/_relay.js for the five plain /api ones -- and worker/index.ts points
+    // both at relayFetchViaDurableObject: /ais/snapshot reaches the Durable
+    // Object, and an unported path answers 404 without leaving the isolate.
+    // Fixing one layer and not the other is what left /api/opensky and
+    // /api/telegram-feed on 522 after the first pass. Their handlers
+    // already read a non-ok relay response as "no data", so this is the same
+    // empty answer as "WS_RELAY_URL not configured" -- minus the ten to thirty
+    // seconds each call used to spend waiting for a self-fetch to time out.
+    "WS_RELAY_URL": "https://worldmonitor.sibt.ai",
+    // Where the seed containers' self-calls land (resilience ranking refresh,
+    // runtime manifest, per-country score warmup). The scripts default to
+    // https://api.worldmonitor.app — the upstream author's domain — so without
+    // this every self-call left the fork, presented our refresh key to a site
+    // that has never heard of it, and took a 401. Found 2026-08-07 when
+    // seed-resilience-scores reported missingScorePayloads=196: the ranking
+    // refresh had never once run against our own deployment. Containers fetch
+    // over the public internet, so the Worker self-fetch trap above does not
+    // apply to them.
+    "API_BASE_URL": "https://worldmonitor.sibt.ai",
+    // Same account id as the top-level account_id. seed-military-bases.mjs
+    // reads it to fetch seed-data/military-bases-final.json from the
+    // worldmonitor-data R2 bucket (created 2026-08-07) when neither the local
+    // file nor Redis has the dataset. Not a secret; the token that authorizes
+    // the read is CLOUDFLARE_API_TOKEN.
+    "CLOUDFLARE_R2_ACCOUNT_ID": "3e2617436093fffd3446428537e90efd"
+  },
+  // worker/seeds/registry.ts holds the same expressions and says where each
+  // one came from. tests/worker/seed-registry.test.mts fails if these two
+  // lists drift, or if either drops a schedule railway-services.json recorded.
+  // The account ceiling is 250 cron triggers on Workers Paid.
+  "triggers": {
+    "crons": [
+      "*/5 * * * *",
+      "*/10 * * * *",
+      "*/15 * * * *",
+      "5,20,35,50 * * * *",
+      "3,33 * * * *",
+      "11,41 * * * *",
+      "18,48 * * * *",
+      "0 */1 * * *",
+      "13 * * * *",
+      "7,37 * * * *",
+      "8 * * * *",
+      "25 * * * *",
+      "40 * * * *",
+      "45 * * * *",
+      "50 */2 * * *",
+      "15 */3 * * *",
+      "0 */6 * * *",
+      "20 */6 * * *",
+      "35 */6 * * *",
+      "50 */6 * * *",
+      "55 */6 * * *",
+      "0 */12 * * *",
+      "30 */12 * * *",
+      "0 2 * * *",
+      "0 3 * * *",
+      "0 4 * * *",
+      "0 5 * * *",
+      "30 5 * * *",
+      "0 6 * * *",
+      "30 7 * * *",
+      "0 8 * * *",
+      "0 9 * * *",
+      "0 13 * * *",
+      "0 23 * * *",
+      "0 3 * * SUN",
+      "0 10 * * SUN",
+      "0 5 * * SAT",
+      "0 12 * * THU",
+      "45 5 * * SUN",
+      "0 4 1 * *",
+      "0 6 1 * *",
+      "0 7 2 * *",
+      "0 8 3 * *"
+    ]
+  },
+  // One image, one instance per seed script. The registry staggers minutes so
+  // that few expressions share one, but a slow seed still holds its instance
+  // into the next tick. 24 leaves room above the worst-case overlap, which
+  // tests/worker/seed-registry.test.mts computes minute by minute.
+  //
+  // A registry reference, not "./Dockerfile.seeds": a Dockerfile path makes
+  // wrangler build the image locally, so every deploy would need a running
+  // Docker daemon. .github/workflows/seed-container-image.yml builds and pushes
+  // it instead, and this line names what that run produced.
+  //
+  // The tag comes from scripts/seed-image-tag.sh, which hashes the build
+  // context. It has to move with the content: wrangler sends a registry image
+  // to the API as this tag string -- only the local-Docker path substitutes a
+  // digest -- so reusing one tag for new content leaves the old image running.
+  // Change anything the image copies and this line changes with it;
+  // tests/worker/seed-image-tag.test.mts fails until it does.
+  "containers": [
+    {
+      "class_name": "SeedContainer",
+      "image": "registry.cloudflare.com/3e2617436093fffd3446428537e90efd/worldmonitor-seeds:seeds-baef646f69e7",
+      "max_instances": 24,
+      "instance_type": "standard-1"
+    }
+  ],
+  // Backs /api/send, the dashboard's own event collector. Analytics Engine
+  // rather than a database: writes are fire-and-forget from the request path,
+  // there is nothing to run or back up, and the data is read with SQL through
+  // the Cloudflare API. worker/routes/analytics-collect.ts holds the schema.
+  "analytics_engine_datasets": [
+    { "binding": "WM_ANALYTICS", "dataset": "wm_events" }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "COUNTER", "class_name": "CounterDO" },
+      { "name": "SEED_CONTAINER", "class_name": "SeedContainer" },
+      { "name": "AIS_RELAY", "class_name": "AisRelayDO" }
+    ]
+  },
+  // v1 is CounterDO's and is never edited — a new class needs its own tag.
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["CounterDO"] },
+    { "tag": "v2", "new_sqlite_classes": ["SeedContainer"] },
+    { "tag": "v3", "new_sqlite_classes": ["AisRelayDO"] }
+  ]
+}

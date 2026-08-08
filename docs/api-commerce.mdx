@@ -1,0 +1,140 @@
+---
+title: "Commerce Endpoints"
+description: "Checkout, customer portal, product catalog, and referral endpoints — thin edge proxies over Convex and Stripe for World Monitor billing."
+---
+
+WorldMonitor uses [Stripe](https://stripe.com) for PRO subscriptions and [Convex](https://convex.dev) as the source-of-truth for entitlements. These edge endpoints are thin auth proxies — they validate the Supabase JWT, then forward to Convex HTTP actions via `RELAY_SHARED_SECRET`.
+
+## Checkout
+
+### `POST /api/create-checkout`
+
+Creates a Stripe checkout session and returns the hosted-checkout URL.
+
+- **Auth**: Supabase bearer (required)
+- **Body**:
+  ```json
+  { "productId": "pro-monthly", "returnUrl": "https://worldmonitor.sibt.ai/pro/success" }
+  ```
+- **Response**: `{ "checkoutUrl": "https://checkout.stripe.com/c/pay/..." }`
+- **Idempotency**: optional `Idempotency-Key` supported for 10 minutes after a successful response. Retrying the same key with an identical body replays the original checkout response instead of creating another checkout attempt.
+- **returnUrl** is validated against an allowlist on the Convex side.
+
+### `POST /api/customer-portal`
+
+Creates a Stripe customer-portal session for an existing subscriber (update card, cancel, view invoices).
+
+- **Auth**: Supabase bearer + active entitlement
+- **Response**: `{ "portalUrl": "..." }`
+- **Idempotency**: optional `Idempotency-Key` supported. Retrying the same key replays the original portal response instead of creating another portal attempt.
+
+## Product catalog
+
+### `GET /api/product-catalog`
+
+Returns the tier view-model used by the `/pro` pricing page. Cached in Redis under `product-catalog:v3` for 1 hour; on cache miss, fetches live prices from Stripe and falls back to the static `FALLBACK_PRICES` in `api/_product-catalog.generated.js` if Stripe is unreachable. Response carries an `X-Product-Catalog-Source` header so probes can tell cache hits from live fetches.
+
+**Response** (tiers ordered `free`, `pro`, `pro_business`, `api_starter`, `api_business`, `enterprise`):
+
+```json
+{
+  "tiers": [
+    {
+      "name": "Free",
+      "localeKey": "free",
+      "description": "Get started with the essentials",
+      "features": ["Core dashboard panels", "..."],
+      "cta": "Get Started",
+      "href": "https://worldmonitor.sibt.ai",
+      "highlighted": false,
+      "price": 0,
+      "period": "forever"
+    },
+    {
+      "name": "Pro",
+      "localeKey": "pro",
+      "description": "Full intelligence dashboard",
+      "features": ["..."],
+      "highlighted": true,
+      "highlightFeatures": ["Commercial license included"],
+      "monthlyPrice": 29,
+      "monthlyProductId": "wm_pro_monthly",
+      "annualPrice": 290,
+      "annualProductId": "wm_pro_annual"
+    },
+    {
+      "name": "API",
+      "localeKey": "api",
+      "description": "Build internal tools on live intelligence data",
+      "features": ["..."],
+      "highlighted": false,
+      "monthlyPrice": 49,
+      "monthlyProductId": "wm_api_monthly",
+      "annualPrice": 490,
+      "annualProductId": "wm_api_annual"
+    },
+    {
+      "name": "API Business",
+      "localeKey": "apiBusiness",
+      "description": "Launch your own product on WorldMonitor data",
+      "features": ["..."],
+      "highlighted": false,
+      "monthlyPrice": 299,
+      "monthlyProductId": "wm_api_business_monthly",
+      "annualPrice": 2990,
+      "annualProductId": "wm_api_business_annual"
+    },
+    {
+      "name": "Enterprise",
+      "localeKey": "enterprise",
+      "description": "Custom solutions for organizations",
+      "features": ["..."],
+      "cta": "Contact Sales",
+      "href": "mailto:hello@sibt.ai",
+      "highlighted": false,
+      "price": null
+    }
+  ],
+  "fetchedAt": 1751799600000,
+  "cachedUntil": 1751803200000,
+  "priceSource": "stripe"
+}
+```
+
+Notes:
+
+- Price fields are flat on the tier. Paid tiers always expose `monthlyPrice` / `monthlyProductId`, and add `annualPrice` / `annualProductId` only when an annual variant exists. Free uses `price: 0, period: "forever"`; Enterprise uses `price: null`.
+- `highlightFeatures` is an optional array of license/commercial-use callouts, rendered separately from `features` on the pricing page. Tiers without a callout omit the field.
+- Prices are dollars (Stripe returns cents; the handler divides by 100). Currency is implicit USD for the published catalog.
+
+### `DELETE /api/product-catalog`
+
+Purges the cached catalog. Requires `Authorization: Bearer $RELAY_SHARED_SECRET`. Internal.
+
+## Referrals
+
+### `GET /api/referral/me`
+
+Returns the caller's deterministic referral code (an 8-char HMAC of the Supabase user ID, stable for the life of the account) and a pre-built share URL. Supabase bearer required. The handler also fires a best-effort `ctx.waitUntil` Convex binding so future `/pro?ref=<code>` signups can attribute — this never blocks the response.
+
+```json
+{
+  "code": "a1b2c3d4",
+  "shareUrl": "https://worldmonitor.sibt.ai/pro?ref=a1b2c3d4"
+}
+```
+
+Errors:
+
+- `401 UNAUTHENTICATED` — missing or invalid Supabase JWT.
+- `503 service_unavailable` — `BRIEF_URL_SIGNING_SECRET` not configured (the referral-code HMAC reuses that secret).
+
+No `referrals` count or `rewardMonths` is returned today. The waitlist path credits correctly, but the checkout path is counted separately, and showing one of the two alone would mislead.
+
+`affonso_referral` was the metadata key Dodo forwarded to Affonso's referral-tracking webhook. Stripe forwards nothing, so that outbound half is gone. What remains is our own write in `convex/payments/checkout.ts` and read in `convex/payments/subscriptionHelpers.ts`, which creates the `userReferralCredits` row. The name is still load-bearing — renaming it breaks that read and every row already stamped with it.
+
+## Waitlist
+
+### `POST /api/leads/v1/register-interest`
+
+Captures an email into the Convex waitlist table. Turnstile-verified (desktop sources bypass), rate-limited per IP. Part of `LeadsService`; see [Platform endpoints](/api-platform) for the request shape.

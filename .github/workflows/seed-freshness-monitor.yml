@@ -1,0 +1,62 @@
+name: Seed Freshness Monitor
+
+# Off in the Actions tab, and the reason it was switched off is now fixed. The
+# acceptance step below asks a worker for /api/health?compact=1, which this fork
+# did not route -- worker/routes/domains.ts serves only the /api/health/v1/
+# prefix. worker/routes/health.ts now routes the bare path, so the check has
+# something to read. Turn the workflow back on from the Actions tab once
+# `node scripts/check-seed-freshness.mjs` passes against the live site; until
+# the seeds themselves report clean it would fail every 15 minutes.
+#
+# It also used to install the Railway CLI and reconcile the seed registry
+# against a Railway project. There is no such project here; the seeds run as
+# Cloudflare cron triggers. What that audit still checked -- that each row's
+# declared files match its import graph -- now runs in the test suite, in
+# tests/seed-services-registry.test.mjs.
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  statuses: read
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: ingestion-acceptance-production
+      deployment: false
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Require green main for scheduled acceptance
+        id: gate
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          # GitHub guarantees newest-first status history. Preserve that order:
+          # updated_at has only second resolution, so sorting can invert ties.
+          gate_state=$(
+            gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/statuses?per_page=100" |
+              jq -r 'flatten | map(select(.context == "gate")) | first | .state // "missing"'
+          )
+          echo "gate_state=$gate_state"
+          if [ "$gate_state" != "success" ]; then
+            echo "::error::Cannot establish ingestion operational acceptance because main gate is $gate_state."
+            exit 1
+          fi
+          echo "Exact main revision passed repository gates."
+
+      - name: Check ingestion operational acceptance
+        run: node scripts/check-seed-freshness.mjs
