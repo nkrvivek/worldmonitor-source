@@ -1,0 +1,28 @@
+node_modules
+# A bare pattern matches the context root only, so scripts/node_modules would
+# otherwise ride along and overwrite what `npm ci` installed in the image —
+# with macOS binaries, on a linux/amd64 image. Every Dockerfile here installs
+# its own dependencies, so nothing needs a host node_modules copied in.
+**/node_modules
+dist
+.git
+.github
+.windsurf
+.agent
+.agents
+.claude
+.factory
+.planning
+e2e
+src-tauri/target
+src-tauri/sidecar/node
+*.log
+# Local self-hosting credentials must not enter Docker build contexts or caches.
+docker-compose.override.yml
+secrets/
+*.md
+!README.md
+!CHANGELOG.md
+docs/internal
+docs/Docs_To_Review
+tests

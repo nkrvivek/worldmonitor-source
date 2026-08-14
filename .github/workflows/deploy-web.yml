@@ -1,0 +1,138 @@
+name: Deploy worldmonitor-web
+
+# Builds the frontend and deploys the worldmonitor-web Worker to Cloudflare
+# account 3e2617436093fffd3446428537e90efd.
+#
+# Why this exists: until 2026-08-12 nothing deployed this Worker. `npm ci &&
+# WORKERS_CI=1 npm run build && wrangler deploy` was a step in a document
+# (docs/deploy/cloudflare-cutover.md), run from a laptop when someone
+# remembered. The Seed Freshness Monitor is what found the cost — two merged,
+# tested, green-CI fixes sat undeployed for 17 hours while the monitor kept
+# failing on the bugs they fixed. A merged fix that never ships looks exactly
+# like a fix that did not work.
+#
+# The build is not optional. `assets.directory` in wrangler.jsonc is ./dist and
+# the deploy uploads whatever is sitting there — thousands of files. Deploying
+# without building first ships whatever dist/ happened to hold, which on a
+# laptop means silently reverting the frontend to an older build.
+#
+# Ordering against the image. wrangler.jsonc pins a container image by tag, and
+# `Build seed container image` is what puts that tag in the registry. Deploying
+# before that run finishes fails on a missing image. So a push that will start
+# an image build does NOT deploy here — it waits and deploys on the
+# workflow_run trigger below, after the image lands. The path list in the
+# "Decide" step mirrors the `paths:` list of that workflow for exactly that
+# reason; the two must move together.
+#
+# Required repo secrets:
+#   CLOUDFLARE_API_TOKEN  — token with Workers Scripts:Edit on that account.
+#   CLOUDFLARE_ACCOUNT_ID — that same account ID.
+
+on:
+  push:
+    branches: [main]
+  workflow_run:
+    workflows: ['Build seed container image']
+    types: [completed]
+  workflow_dispatch:
+
+# Two deploys of the same Worker at once is a coin flip over which one is
+# live. Queue instead of cancelling: a cancelled deploy leaves the previous
+# commit serving, which is a silent revert of whatever just merged.
+concurrency:
+  group: deploy-worldmonitor-web
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+    # A failed image build must not deploy: wrangler.jsonc would point at a tag
+    # that does not exist in the registry.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # workflow_run runs against the default branch tip unless told
+          # otherwise, which would deploy a commit the image was not built for.
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          # The push path below diffs against github.event.before, which a
+          # shallow clone does not contain.
+          fetch-depth: 0
+
+      - name: Decide whether this event deploys
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          set -uo pipefail
+
+          if [ "$EVENT" != "push" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            echo "$EVENT: deploying."
+            exit 0
+          fi
+
+          # Mirrors the paths: list of .github/workflows/seed-container-image.yml.
+          # Anything here starts an image build, so this push defers to the
+          # workflow_run trigger rather than racing it.
+          image_paths='^(Dockerfile\.seeds|\.dockerignore|scripts/|server/|shared/|data/|worker/counters/|tsconfig\.json|tsconfig\.api\.json|wrangler\.jsonc|\.github/workflows/seed-container-image\.yml)'
+
+          if ! changed="$(git diff --name-only "$BEFORE" "$AFTER" 2>/dev/null)"; then
+            # A force-push or an unreachable base leaves nothing to compare.
+            # Deploy rather than skip: a missed deploy is the failure this
+            # workflow exists to stop, and a premature one fails loudly on the
+            # image reference and re-runs on workflow_run.
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            echo "Could not diff $BEFORE..$AFTER — deploying anyway."
+            exit 0
+          fi
+
+          if printf '%s\n' "$changed" | grep -qE "$image_paths"; then
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            echo "This push rebuilds the seed image. Deferring to the workflow_run trigger."
+          else
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            echo "No image-feeding path changed. Deploying."
+          fi
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: steps.decide.outputs.deploy == 'true'
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install
+        if: steps.decide.outputs.deploy == 'true'
+        run: npm ci
+
+      - name: Build
+        if: steps.decide.outputs.deploy == 'true'
+        # WORKERS_CI=1 is what the documented gate and the upstream-sync PR body
+        # both use; vite.config.ts reads it to skip a build step that only
+        # applies off-Workers.
+        run: WORKERS_CI=1 npm run build
+
+      - name: Deploy
+        if: steps.decide.outputs.deploy == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        # No Docker here on purpose. wrangler.jsonc references the seed image by
+        # registry tag, and wrangler only shells out to the Docker CLI when it
+        # has to build one.
+        run: npx wrangler deploy
+
+      - name: Report the deployed version
+        if: steps.decide.outputs.deploy == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler deployments list --name worldmonitor-web | head -30

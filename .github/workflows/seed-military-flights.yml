@@ -1,0 +1,49 @@
+# Publishes the military-flights seed from a GitHub runner every hour.
+#
+# Built 2026-08-10 after the root cause of the dead flights domain landed:
+# OpenSky drops TCP connects from Cloudflare container egress
+# (UND_ERR_CONNECT_TIMEOUT on the token endpoint and the anon API alike),
+# so the container tick can never fetch — it exits no_flights forever.
+# GitHub runner IPs get through; two dispatch runs published 26 and 32
+# flights before this cron existed. This workflow IS the flights exit,
+# not a fallback, so there is no stand-down guard: it must run whether
+# Cloudflare's scheduler is healthy or not.
+#
+# The seed chain imports only node built-ins and sibling scripts, so the
+# job skips npm ci and bills about a minute per run. The :07/:37 offset
+# keeps it off the container's :00/:10/:20 ticks (the failing container
+# run still takes the 120s seed lock while its connects time out) and off
+# seed-fallback's :17.
+#
+# Live TTL on military:flights:v1 is 600s, so the key does go stale
+# between hourly runs; the 24h stale mirror covers display. Hourly was
+# the user's explicit pick (2026-08-10) over 30-min to halve the
+# Actions-minutes bill: ~720 min/mo instead of ~1,440 on a private repo.
+name: seed-military-flights
+on:
+  schedule:
+    - cron: "7 * * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency: seed-military-flights
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: run military-flights seed
+        env:
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          OPENSKY_CLIENT_ID: ${{ secrets.OPENSKY_CLIENT_ID }}
+          OPENSKY_CLIENT_SECRET: ${{ secrets.OPENSKY_CLIENT_SECRET }}
+          WORLDMONITOR_SEED_REFRESH_KEY: ${{ secrets.WORLDMONITOR_SEED_REFRESH_KEY }}
+          # Not a secret — the fork's own hostname. The seed scripts default
+          # their self-calls to the upstream author's api.worldmonitor.app.
+          API_BASE_URL: https://worldmonitor.sibt.ai
+        run: node scripts/seed-military-flights.mjs

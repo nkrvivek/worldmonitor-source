@@ -1,0 +1,70 @@
+# Keeps the six relay warm-ping caches hot on the fork's own gateway.
+#
+# Built 2026-08-09, seed cleanup batch 2. Since e7ad6391d the insights
+# container carries WORLDMONITOR_RELAY_KEY and warms its own digest, so this
+# workflow is no longer the only thing between that seed and a cold cache —
+# but it is still the sole warmer for the request-driven producers behind
+# risk-scores and temporal-anomalies, whose old 8-minute warmer (the Railway
+# relay, see RELAY_WARM_PING_PATHS in server/gateway.ts) is gone.
+#
+# Every 15 minutes, not 30: temporal-anomalies data carries a 60-minute TTL,
+# so at a 30-minute cadence one skipped GitHub tick — and scheduled runs do
+# skip or lag — left a guaranteed EMPTY window (measured 2026-08-09: the
+# 20:07Z tick never fired and both producers went stale together at 19:39Z).
+# At 15 minutes, two consecutive skips still leave a 45-minute gap inside the
+# TTL.
+#
+# Since 2026-08-10 this is the BACKUP warmer: scripts/seed-warm-ping.mjs runs
+# the same six warms every 15 minutes on the container rail, because GitHub
+# crons skip (no tick 00:38Z-03:01Z, riskScores went EMPTY inside its bound)
+# and Cloudflare crons do not. The warms are idempotent, so both rails run.
+#
+# Six curls, no checkout, no npm ci. The path list mirrors
+# RELAY_WARM_PING_PATHS in server/gateway.ts and scripts/seed-warm-ping.mjs —
+# change one, change all three (tests/warm-ping-mirror.test.mjs pins them).
+name: warm-ping
+on:
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency: warm-ping
+jobs:
+  warm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: warm the relay paths
+        env:
+          RELAY_KEY: ${{ secrets.WORLDMONITOR_RELAY_KEY }}
+          API_BASE_URL: https://worldmonitor.sibt.ai
+        run: |
+          if [ -z "$RELAY_KEY" ]; then
+            echo "WORLDMONITOR_RELAY_KEY is not set — the gateway fails closed, nothing to warm."
+            exit 1
+          fi
+          # The digest is a GET because seed-insights and the benchmark read it
+          # that way; the variant/lang pair names the exact cache key the
+          # benchmark starves without (news:digest:v1:full:en). The rest are
+          # POST {} RPCs, same shape the seed scripts send.
+          fail=0
+          warm() {
+            name="$1"; shift
+            if curl -sf --max-time 60 -o /dev/null \
+                -H "X-WorldMonitor-Key: $RELAY_KEY" \
+                -H "Content-Type: application/json" \
+                "$@"; then
+              echo "$name: OK"
+            else
+              echo "$name: FAILED"
+              fail=1
+            fi
+          }
+          warm service-statuses  -X POST --data '{}' "$API_BASE_URL/api/infrastructure/v1/list-service-statuses"
+          warm cable-health      -X POST --data '{}' "$API_BASE_URL/api/infrastructure/v1/get-cable-health"
+          warm temporal-anomalies -X POST --data '{}' "$API_BASE_URL/api/infrastructure/v1/list-temporal-anomalies"
+          warm risk-scores       -X POST --data '{}' "$API_BASE_URL/api/intelligence/v1/get-risk-scores"
+          warm chokepoint-status -X POST --data '{}' "$API_BASE_URL/api/supply-chain/v1/get-chokepoint-status"
+          warm feed-digest       "$API_BASE_URL/api/news/v1/list-feed-digest?variant=full&lang=en"
+          exit "$fail"

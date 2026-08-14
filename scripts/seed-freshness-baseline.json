@@ -1,0 +1,305 @@
+{
+  "$comment": [
+    "Accepted-problem baseline for scripts/check-seed-freshness.mjs.",
+    "",
+    "The acceptance gate fails on any compact-health problem that is NOT listed here.",
+    "An entry means: this degradation is known, has an owner record, and must not page.",
+    "It does NOT mean the problem is acceptable forever -- expiresAt forces a re-review,",
+    "and the gate fails outright once that date passes.",
+    "",
+    "Entries are matched on name:status exactly. A source that recovers is reported as",
+    "'recovered' on the next run (prune it); a source that fails with a DIFFERENT status",
+    "than the one baselined is treated as new and blocks, which is the point.",
+    "",
+    "Every entry carries a real tracking issue, never the PR that introduced the entry:",
+    "a merged PR closes, and a suppression pointing at a closed PR has no owner.",
+    "",
+    "Softening fault statuses is the marketImplications blind spot the ON_DEMAND_KEYS policy",
+    "block in api/health.js exists to prevent."
+  ],
+  "expiresAt": "2026-08-27",
+  "acknowledged": [
+    {
+      "name": "chinaCoverage",
+      "status": "CHINA_DEGRADED",
+      "issue": 14,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "chokepointTransits",
+      "status": "EMPTY",
+      "issue": 15,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "climateAnomalies",
+      "status": "EMPTY",
+      "issue": 16,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "climateDisasters",
+      "status": "COVERAGE_PARTIAL",
+      "issue": 82,
+      "reason": "ReliefWeb returns nothing until they approve an appname for us; the seed publishes on the natural-events half alone and now says so in coverage. Blocked on their reply, not on us. Prune this once RELIEFWEB_APPNAME is set and coverage reads ok."
+    },
+    {
+      "name": "climateZoneNormals",
+      "status": "EMPTY",
+      "issue": 17,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "comtradeBilateralHs4",
+      "status": "EMPTY",
+      "issue": 18,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "consumerPricesCategories",
+      "status": "EMPTY",
+      "issue": 19,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "consumerPricesCoverage",
+      "status": "EMPTY",
+      "issue": 20,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "consumerPricesCoverageAU",
+      "status": "EMPTY",
+      "issue": 21,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "consumerPricesCoverageBR",
+      "status": "EMPTY",
+      "issue": 22,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "consumerPricesCoverageGB",
+      "status": "EMPTY",
+      "issue": 23,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "consumerPricesCoverageIN",
+      "status": "EMPTY",
+      "issue": 24,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "consumerPricesCoverageSA",
+      "status": "EMPTY",
+      "issue": 25,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "consumerPricesCoverageSG",
+      "status": "EMPTY",
+      "issue": 26,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "consumerPricesCoverageUS",
+      "status": "EMPTY",
+      "issue": 27,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "consumerPricesFreshness",
+      "status": "EMPTY",
+      "issue": 28,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "consumerPricesMovers",
+      "status": "EMPTY",
+      "issue": 29,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "consumerPricesOverview",
+      "status": "EMPTY",
+      "issue": 30,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "consumerPricesSpread",
+      "status": "EMPTY",
+      "issue": 31,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "crossStraitActivityJapanMod",
+      "status": "SEED_ERROR",
+      "issue": 5714,
+      "reason": "Japan MOD route returns proxy CONNECT 403; candidate country-specific routes return 407. Second cause independent of the #5689 Decodo exhaustion. No verified replacement endpoint installed."
+    },
+    {
+      "name": "cyberThreats",
+      "status": "EMPTY",
+      "issue": 32,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "defensePatents",
+      "status": "EMPTY",
+      "issue": 33,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "digestNotifications",
+      "status": "EMPTY",
+      "issue": 34,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "euFsi",
+      "status": "STALE_CONTENT",
+      "issue": 83,
+      "reason": "ECB stopped publishing D.U2.Z0Z.4F.EC.SS_CIN.IDX after 2026-08-04. Measured 2026-08-14: endpoint returns 200 with 25 observations since 2026-07-01, last one 10.3 days old, and no gap over 4 days anywhere in the preceding year. SS_CIN is still the live key; the legacy SS_CI now returns zero bytes. The seeder, the key and the content-age contract are all correct, so there is nothing here to fix until ECB either resumes or names a successor series."
+    },
+    {
+      "name": "flightDelays",
+      "status": "EMPTY",
+      "issue": 37,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "forecastBets",
+      "status": "STALE_SEED",
+      "issue": 38,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "groceryBasket",
+      "status": "EMPTY",
+      "issue": 40,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "gscpi",
+      "status": "EMPTY",
+      "issue": 41,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "intelHistoryIngestConflictAcled",
+      "status": "SEED_ERROR",
+      "issue": 42,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "intelHistoryIngestEnergyIntelligence",
+      "status": "SEED_ERROR",
+      "issue": 43,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "intelHistoryIngestMilitaryCrossStrait",
+      "status": "SEED_ERROR",
+      "issue": 44,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "intlDelays",
+      "status": "STALE_SEED",
+      "issue": 45,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "jodiGas",
+      "status": "EMPTY",
+      "issue": 46,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "jodiOil",
+      "status": "EMPTY",
+      "issue": 47,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "lngVulnerability",
+      "status": "EMPTY",
+      "issue": 48,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "newsThreatSummary",
+      "status": "STALE_SEED",
+      "issue": 53,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "notamClosures",
+      "status": "STALE_SEED",
+      "issue": 54,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "pizzint",
+      "status": "EMPTY",
+      "issue": 55,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "productCatalog",
+      "status": "EMPTY",
+      "issue": 57,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "resilienceIntervals",
+      "status": "STALE_SEED",
+      "issue": 58,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "riskScores",
+      "status": "COVERAGE_PARTIAL",
+      "issue": 59,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "satellites",
+      "status": "EMPTY",
+      "issue": 60,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "sectors",
+      "status": "EMPTY",
+      "issue": 61,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "socialVelocity",
+      "status": "EMPTY",
+      "issue": 64,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "techEvents",
+      "status": "EMPTY",
+      "issue": 65,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "telegramFeed",
+      "status": "EMPTY",
+      "issue": 66,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    },
+    {
+      "name": "wsbTickers",
+      "status": "EMPTY",
+      "issue": 74,
+      "reason": "Accepted at cleanup-queue baseline 2026-08-09; being worked through the umbrella issue, not yet diagnosed individually."
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+name: IndexNow Submission
+
+# Tell search engines which of our canonical URLs changed.
+#
+# Upstream fired this from Vercel's deployment_status event and split the work
+# into an apex batch and a www batch, each gated on which files that deployment
+# touched. Neither half survives here: this fork deploys to Cloudflare by hand
+# (scripts/cf-deploy.sh), so no deployment_status event ever arrives, and it
+# serves one host, so there is one batch. An operator runs this after a deploy.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: indexnow-production
+  cancel-in-progress: false
+
+jobs:
+  submit-indexnow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: Check the ownership key is committed
+        shell: bash
+        run: |
+          KEY_PATH="$(
+            node --input-type=module -e "
+              import { INDEXNOW_BATCHES } from './scripts/seo-indexnow-submit.mjs';
+              process.stdout.write(new URL(INDEXNOW_BATCHES[0].keyLocation).pathname.slice(1));
+            "
+          )"
+          test -f "public/${KEY_PATH}"
+      - name: Submit canonical URLs
+        run: node scripts/seo-indexnow-submit.mjs

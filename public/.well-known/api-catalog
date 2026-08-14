@@ -1,0 +1,104 @@
+{
+  "linkset": [
+    {
+      "anchor": "https://worldmonitor.sibt.ai/.well-known/api-catalog",
+      "item": [
+        {
+          "href": "https://worldmonitor.sibt.ai/",
+          "title": "World Monitor REST API"
+        },
+        {
+          "href": "https://worldmonitor.sibt.ai/mcp",
+          "title": "World Monitor MCP server"
+        }
+      ]
+    },
+    {
+      "anchor": "https://worldmonitor.sibt.ai/",
+      "service-desc": [
+        {
+          "href": "https://worldmonitor.sibt.ai/openapi.yaml",
+          "type": "application/vnd.oai.openapi"
+        },
+        {
+          "href": "https://worldmonitor.sibt.ai/openapi.json",
+          "type": "application/json"
+        }
+      ],
+      "service-doc": [
+        {
+          "href": "https://worldmonitor.sibt.ai/docs/documentation",
+          "type": "text/html"
+        }
+      ],
+      "service-meta": [
+        {
+          "href": "https://worldmonitor.sibt.ai/pricing.md",
+          "type": "text/markdown",
+          "title": "Pricing, plans & limits (machine-readable)"
+        },
+        {
+          "href": "https://worldmonitor.sibt.ai/api/product-catalog",
+          "type": "application/json",
+          "title": "Live product catalog (tiers, prices, product IDs)"
+        },
+        {
+          "href": "https://worldmonitor.sibt.ai/docs/openapi/CommerceService.openapi.yaml",
+          "type": "application/vnd.oai.openapi",
+          "title": "Commerce/pricing endpoints OpenAPI (separate from the root bundle)"
+        },
+        {
+          "href": "https://worldmonitor.sibt.ai/support.md",
+          "type": "text/markdown",
+          "title": "Support channels & contact (machine-readable)"
+        },
+        {
+          "href": "https://worldmonitor.sibt.ai/agents.md",
+          "type": "text/markdown",
+          "title": "Agent operations guide (surfaces, auth, crawl policy)"
+        },
+        {
+          "href": "https://worldmonitor.sibt.ai/developers.md",
+          "type": "text/markdown",
+          "title": "World Monitor Developer Portal — links every developer resource by name"
+        },
+        {
+          "href": "https://worldmonitor.sibt.ai/mcp-server.md",
+          "type": "text/markdown",
+          "title": "World Monitor MCP Server — endpoint, tools, auth (machine-readable)"
+        },
+        {
+          "href": "https://worldmonitor.sibt.ai/openapi.md",
+          "type": "text/markdown",
+          "title": "World Monitor OpenAPI Specification — REST API contract (machine-readable)"
+        },
+        {
+          "href": "https://worldmonitor.sibt.ai/sdks.md",
+          "type": "text/markdown",
+          "title": "World Monitor SDKs — Python, Ruby, Go, JavaScript (machine-readable)"
+        }
+      ],
+      "status": [
+        {
+          "href": "https://worldmonitor.sibt.ai/api/health?compact=1",
+          "type": "application/json"
+        }
+      ],
+      "agent-skills-index": [
+        {
+          "href": "https://worldmonitor.sibt.ai/.well-known/agent-skills/index.json",
+          "type": "application/json"
+        }
+      ]
+    },
+    {
+      "anchor": "https://worldmonitor.sibt.ai/mcp",
+      "service-desc": [
+        {
+          "href": "https://worldmonitor.sibt.ai/.well-known/mcp/server-card.json",
+          "type": "application/json"
+        }
+      ]
+    }
+  ]
+}
