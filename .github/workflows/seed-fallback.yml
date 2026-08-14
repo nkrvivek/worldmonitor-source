@@ -56,7 +56,7 @@ jobs:
           fi
       - uses: actions/checkout@v4
         if: steps.guard.outputs.alive != 'true'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: steps.guard.outputs.alive != 'true'
         with:
           node-version: 24
