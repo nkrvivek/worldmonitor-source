@@ -1,0 +1,148 @@
+name: Upstream Sync
+
+# Monthly fork sync, per docs/deploy/upstream-sync.md.
+#
+# The fork diverges fast — 382 upstream commits landed between 2026-07-22 and
+# 2026-08-03 — and a sync left for a quarter turns into archaeology. This job
+# does the mechanical half on a schedule: fetch koala73/worldmonitor, try the
+# merge on a branch, and either open a PR (clean) or open an issue listing the
+# conflicting files (not clean).
+#
+# It never pushes to upstream and never touches main. It does not decide the
+# sync is good: the gate in docs/deploy/upstream-sync.md, run on node 24, is
+# still what says the merge may land, and the deploy check after that is what
+# says the sync is done.
+
+on:
+  schedule:
+    # 2nd of the month, 14:23 UTC (7:23 AM PT). Off the hour on purpose.
+    - cron: "23 14 2 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  sync:
+    name: upstream-sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - name: Merge upstream onto a sync branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_URL: https://github.com/koala73/worldmonitor.git
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Fetch only. No push URL is configured for upstream, so this job
+          # cannot write to someone else's repo even by accident.
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch --no-tags upstream main
+
+          behind="$(git rev-list --count origin/main..upstream/main)"
+          ahead="$(git rev-list --count upstream/main..origin/main)"
+          echo "behind upstream: $behind — ahead of upstream: $ahead"
+
+          if [ "$behind" -eq 0 ]; then
+            echo "Nothing to sync."
+            exit 0
+          fi
+
+          today="$(date -u +%F)"
+          branch="sync/upstream-$today"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            echo "$branch already exists on origin — a sync is already open. Leaving it alone."
+            exit 0
+          fi
+
+          git switch -c "$branch" origin/main
+
+          if git merge --no-ff --no-commit upstream/main; then
+            git commit --no-edit
+            git push origin "$branch"
+            upstream_sha="$(git rev-parse --short upstream/main)"
+
+          cat > /tmp/sync-body.md <<BODY
+          Monthly fork sync. The merge applied with no conflicts, so this branch
+          is upstream/main merged into main, untouched by hand.
+
+          Behind upstream by $behind commits; ahead by $ahead.
+
+          **This PR has no CI.** It was opened with \`GITHUB_TOKEN\`, and GitHub
+          does not start workflow runs for those, so an absence of red checks
+          here means nothing was run.
+
+          Run the gate from [docs/deploy/upstream-sync.md](docs/deploy/upstream-sync.md)
+          yourself, on node 24:
+
+          \`\`\`
+          npm ci
+          npm run typecheck
+          npm run test:worker && npm run test:counters && npm run test:sidecar && npm run test:data
+          WORKERS_CI=1 npm run build
+          \`\`\`
+
+          Then deploy per [docs/deploy/cloudflare-cutover.md](docs/deploy/cloudflare-cutover.md)
+          and check that \`worldmonitor.sibt.ai\` answers. The sync is not done
+          until it does.
+
+          Opened by .github/workflows/upstream-sync.yml.
+          BODY
+
+            gh pr create \
+              --base main \
+              --head "$branch" \
+              --title "sync: merge upstream through $upstream_sha" \
+              --body-file /tmp/sync-body.md
+            exit 0
+          fi
+
+          conflicts="$(git diff --name-only --diff-filter=U)"
+          count="$(printf '%s\n' "$conflicts" | wc -l | tr -d ' ')"
+          git merge --abort
+
+          echo "Conflicting files:"
+          printf '%s\n' "$conflicts"
+
+          cat > /tmp/sync-body.md <<BODY
+          The monthly merge of upstream/main into main conflicts, so this job
+          aborted it rather than commit a broken tree. Nothing was pushed.
+
+          Behind upstream by $behind commits; ahead by $ahead.
+
+          Conflicting files:
+
+          \`\`\`
+          $conflicts
+          \`\`\`
+
+          To resolve, from a checkout on node 24:
+
+          \`\`\`
+          git fetch upstream
+          git switch -c sync/upstream-$today origin/main
+          git merge upstream/main
+          \`\`\`
+
+          Resolve toward the port, per
+          [docs/deploy/upstream-sync.md](docs/deploy/upstream-sync.md): \`wrangler.jsonc\`
+          and \`worker/**\` are ours alone; \`api/**\` and \`server/**\` take upstream's
+          logic while keeping the Worker-side edits; a moved \`vercel.json\` routing
+          table means \`worker/routing/\` moves with it, and \`scripts/routing-parity.mjs\`
+          is what proves it did.
+
+          Opened by .github/workflows/upstream-sync.yml.
+          BODY
+
+          gh issue create \
+            --title "Upstream sync $today: $count conflicting files" \
+            --body-file /tmp/sync-body.md

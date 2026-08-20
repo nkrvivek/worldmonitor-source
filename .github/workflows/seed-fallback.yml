@@ -1,0 +1,104 @@
+# Runs the due seed scripts when Cloudflare's cron scheduler is not.
+#
+# Built 2026-08-07, the day CF stopped firing cron triggers account-wide at
+# 20:50Z with no incident posted and no recovery from a redeploy. The seeds are
+# plain Node programs writing to Upstash over REST; the Worker's scheduler is
+# the only thing they need from Cloudflare, and this workflow stands in for it.
+#
+# The first step asks Cloudflare analytics whether any scheduled invocation of
+# worldmonitor-web landed in the last half hour. If yes, the scheduler is alive
+# and this run stands down before checkout — a healthy hour costs seconds, not
+# minutes, which matters on a private repo where Actions time is billed. If the
+# query itself fails, we run the seeds anyway: a Cloudflare API outage is more
+# likely to accompany a scheduler outage than to contradict one.
+name: seed-fallback
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      since-minutes:
+        description: "Catch-up window in minutes (max 1440)"
+        default: "90"
+      force:
+        description: "Run even if Cloudflare crons look alive (true/false)"
+        default: "false"
+permissions:
+  contents: read
+concurrency: seed-fallback
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: stand down if Cloudflare crons are alive
+        id: guard
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          SINCE=$(date -u -d '30 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+          UNTIL=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          QUERY='query($account:String!,$since:Time!,$until:Time!){viewer{accounts(filter:{accountTag:$account}){workersInvocationsScheduled(limit:10,filter:{scriptName:"worldmonitor-web",datetime_geq:$since,datetime_leq:$until}){datetime}}}}'
+          BODY=$(jq -n --arg q "$QUERY" --arg a "$CF_ACCOUNT_ID" --arg s "$SINCE" --arg u "$UNTIL" \
+            '{query:$q,variables:{account:$a,since:$s,until:$u}}')
+          COUNT=$(curl -sf --max-time 30 -X POST https://api.cloudflare.com/client/v4/graphql \
+            -H "Authorization: Bearer $CF_API_TOKEN" -H 'Content-Type: application/json' \
+            --data "$BODY" \
+            | jq '[.data.viewer.accounts[0].workersInvocationsScheduled[]?] | length' \
+            || echo 0)
+          echo "scheduled invocations in last 30m: ${COUNT:-0}"
+          if [ "${COUNT:-0}" -gt 0 ] && [ "${{ github.event.inputs.force }}" != "true" ]; then
+            echo "alive=true" >> "$GITHUB_OUTPUT"
+            echo "Cloudflare crons are firing — standing down."
+          else
+            echo "alive=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v5
+        if: steps.guard.outputs.alive != 'true'
+      - uses: actions/setup-node@v5
+        if: steps.guard.outputs.alive != 'true'
+        with:
+          node-version: 24
+          cache: npm
+      - name: install
+        if: steps.guard.outputs.alive != 'true'
+        run: npm ci
+      - name: run due seeds
+        if: steps.guard.outputs.alive != 'true'
+        env:
+          # Forwarded from repo secrets. GH only exposes secrets explicitly
+          # listed here. Names come from SEED_ENV_NAMES in worker/seeds/env.ts;
+          # the seed utilities drop names with no value, so listing a secret we
+          # have not set yet costs nothing.
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          CONVEX_SITE_URL: ${{ secrets.CONVEX_SITE_URL }}
+          RELAY_AUTH_HEADER: ${{ secrets.RELAY_AUTH_HEADER }}
+          RELAY_SHARED_SECRET: ${{ secrets.RELAY_SHARED_SECRET }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          OPENAQ_API_KEY: ${{ secrets.OPENAQ_API_KEY }}
+          EIA_API_KEY: ${{ secrets.EIA_API_KEY }}
+          WTO_API_KEY: ${{ secrets.WTO_API_KEY }}
+          NASA_FIRMS_API_KEY: ${{ secrets.NASA_FIRMS_API_KEY }}
+          # OpenSky blackholes Cloudflare container egress (UND_ERR_CONNECT_TIMEOUT
+          # on every connect, 2026-08-10) — GH runners are the working exit for
+          # the military-flights seed until a proxy or Wingbits key lands.
+          OPENSKY_CLIENT_ID: ${{ secrets.OPENSKY_CLIENT_ID }}
+          OPENSKY_CLIENT_SECRET: ${{ secrets.OPENSKY_CLIENT_SECRET }}
+          ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+          WINDY_API_KEY: ${{ secrets.WINDY_API_KEY }}
+          WORLDMONITOR_SEED_REFRESH_KEY: ${{ secrets.WORLDMONITOR_SEED_REFRESH_KEY }}
+          COMTRADE_API_KEYS: ${{ secrets.COMTRADE_API_KEYS }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          WORLDMONITOR_RELAY_KEY: ${{ secrets.WORLDMONITOR_RELAY_KEY }}
+          # Not a secret — the fork's own hostname. The seed scripts default
+          # their self-calls to the upstream author's api.worldmonitor.app.
+          API_BASE_URL: https://worldmonitor.sibt.ai
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          node_modules/.bin/tsx scripts/run-due-seeds.mts \
+            --since-minutes "${{ github.event.inputs.since-minutes || '90' }}"

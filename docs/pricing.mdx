@@ -1,0 +1,65 @@
+---
+title: "Plans & Pricing"
+description: "Free, Pro, API, API Business, and Enterprise plans — prices, what each includes, and the machine-readable pricing surfaces for agents."
+---
+
+World Monitor has a free public dashboard and paid tiers for analyst workflows, API access, and organization deployments.
+
+<Info>
+**Machine-readable sources** (canonical for agents):
+- Markdown: [`/pricing.md`](https://worldmonitor.sibt.ai/pricing.md)
+- Live JSON (tiers, prices, product IDs): [`GET /api/product-catalog`](https://worldmonitor.sibt.ai/api/product-catalog) — public, no key required
+</Info>
+
+## Plans
+
+| Plan | Price | Best for |
+|------|-------|----------|
+| **Free** | $0 — no signup required | Public situational awareness, OSINT research, news monitoring |
+| **Pro** | $29/month · $290/year | WM Analyst chat, Scenario Engine, AI digests, custom widgets, data export, MCP access — 25 dashboards, 250 MCP calls/day, commercial license |
+| **API** | $49/month · $490/year | REST API + SDKs, license / API key included, 1,000 requests/day, webhooks — commercial license for your organization |
+| **API Business** | $299/month · $2,990/year | Everything in API, redistribution rights, 300 requests/minute, 10,000 requests/day, 5 Pro licenses included (same company email), priority support |
+| **Enterprise** | Custom — [hello@sibt.ai](mailto:hello@sibt.ai) | Team workspaces, SSO/MFA/RBAC, white-label, on-premises / air-gapped |
+
+Prices above mirror `convex/config/productCatalog.ts` (the source of truth behind `/api/product-catalog`); a drift guard test keeps this page honest.
+
+## Which license do I need?
+
+Choose by who benefits from the work and where World Monitor data will appear:
+
+| Your use | Plan license |
+| --- | --- |
+| One licensed user uses the dashboard, exports, MCP, or SDK for their own research or for company work, client analysis, reports, presentations, or their own internal workflow | **Pro — Commercial license** |
+| Your organization calls the API from private systems, dashboards, automations, or internal tools | **API — Commercial license for your organization** |
+| Your organization displays, embeds, or delivers API outputs inside a product or service used by customers | **API Business — Commercial license for your customers** |
+| You need higher-volume redistribution, additional seats, white-labeling, a standalone data feed, or a custom deployment | **Enterprise — Custom agreement** |
+
+Pro permits normal client deliverables such as analysis and reports; it does not permit a live customer-facing data product. API crosses the programmatic boundary inside your organization; it does not cross the customer boundary. API Business crosses that customer boundary when World Monitor data is part of a product or service with its own material value, but it does not permit raw-data resale, shared API access, or a standalone substitute for World Monitor.
+
+World Monitor attribution is optional in reports, presentations, and derived analysis permitted by your plan. If you choose to credit us, "Source: World Monitor" or "via World Monitor" is sufficient. Source-specific notices supplied with an output still apply.
+
+These are subscription licenses for the hosted Service and its outputs. They are separate from the AGPL-3.0-only platform source-code license and the MIT licenses on the official thin clients. See the [Terms of Service](/terms#subscription-license-scope) for the full scope, restrictions, examples, and post-cancellation rules.
+
+## What each plan includes
+
+- **Free** — 56 map layers (all free except Resilience, which is Pro), 500+ curated feeds, country briefs, hotspots, instability scores, chokepoints, cascade analysis, breaking alerts, and watchlists, across 3 dashboard tabs. Dashboard refresh cadence is typically 5–15 minutes.
+- **Pro** — everything in Free, plus WM Analyst chat across 30+ live services with citations, Scenario Engine, Route Explorer, personal AI digest (daily / twice-daily / weekly via Slack, Telegram, email, webhook), custom widget builder (25 custom dashboards), the Resilience map layer, data export (CSV, JSON, and PDF reports), 2,500 dashboard-AI requests/day, MCP access (59 tools under one key, 250 calls/day), and priority support. Commercial license included: use it for your own research and for client work, internal tools and reporting.
+- **API** — programmatic access: REST API with structured JSON and cache headers, official SDKs (npm, PyPI, RubyGems, Go), self-serve license / API keys (the `wm_` key the desktop app asks for — see [API keys](/api-keys)), real-time data streams, and webhook notifications (5 rules). Commercial license for your own organization; redistributing the data to your customers requires API Business.
+- **API Business** — the high-volume API tier for teams: everything in API with redistribution rights (embed our data in what you sell), 300 requests/minute and 10,000 requests/day, 5 Pro licenses included, and priority support. Monthly owners can self-serve the owner-plus-four [same-domain team seats](/accounts#api-business-team-seats); the annual plan does not expose that manager yet, so contact support for its current included-seat handling. API customers upgrade from the billing portal (prorated immediately).
+- **Enterprise** — everything in Pro and API, plus team workspaces, SSO/MFA/RBAC, dedicated support, white-label and embeddable panels, SIEM connectors, bulk export, and cloud / dedicated-tenant / on-premises / air-gapped deployment.
+
+## Limits & overage
+
+Rate limits are hard limits by default: exceeding a plan quota returns HTTP `429` with `Retry-After` and `X-RateLimit-*` headers. Usage above quota is rejected — never silently charged. Per-endpoint budgets: [Rate Limits](/usage-rate-limits).
+
+Need a higher limit? Upgrade at [worldmonitor.sibt.ai/pro](https://worldmonitor.sibt.ai/pro) or contact [hello@sibt.ai](mailto:hello@sibt.ai).
+
+## Buying and managing a subscription
+
+Checkout runs on [Stripe](https://stripe.com); entitlements live in Convex. Subscribe from [worldmonitor.sibt.ai/pro](https://worldmonitor.sibt.ai/pro); manage billing (invoices, cancel, renew) via the customer portal on the same page. Endpoint details: [Commerce Endpoints](/api-commerce).
+
+## Related
+
+- [Accounts & Sign-up](/accounts) — the free tier needs no account at all
+- [Authentication & Usage](/usage-auth) — key types and the auth matrix
+- [Rate Limits](/usage-rate-limits) — per-endpoint request budgets

@@ -1,0 +1,249 @@
+{
+  "$comment": [
+    "Accepted-problem baseline for scripts/check-seed-freshness.mjs.",
+    "",
+    "The acceptance gate fails on any compact-health problem that is NOT listed here.",
+    "An entry means: this degradation is known, has an owner record, and must not page.",
+    "It does NOT mean the problem is acceptable forever -- expiresAt forces a re-review,",
+    "and the gate fails outright once that date passes.",
+    "",
+    "Entries are matched on name:status exactly. A source that recovers is reported as",
+    "'recovered' on the next run (prune it); a source that fails with a DIFFERENT status",
+    "than the one baselined is treated as new and blocks, which is the point.",
+    "",
+    "Every entry carries a real tracking issue, never the PR that introduced the entry:",
+    "a merged PR closes, and a suppression pointing at a closed PR has no owner.",
+    "",
+    "Softening fault statuses is the marketImplications blind spot the ON_DEMAND_KEYS policy",
+    "block in api/health.js exists to prevent.",
+    "",
+    "Re-reviewed 2026-08-19, and that is why expiresAt moved from 2026-08-27 to 2026-09-18.",
+    "Every one of the 37 entries was measured against Redis or read out of the code on that",
+    "date; none still points at the umbrella issue for its reason. The review found four groups.",
+    "Credential-blocked and named: consumerPrices (13 rows, one missing key), aviation (3 rows,",
+    "a free-tier quota the user chose to keep), cyberThreats, defensePatents, grocery-basket,",
+    "telegramFeed, classify and news-threat-summary. Upstream and outside our reach:",
+    "climateDisasters, and the macro half of chinaCoverage. Working as designed: forecastBets.",
+    "Genuinely ours to fix, and the only rows that should move before the next review: the",
+    "three intelHistoryIngest rows (RELAY_SHARED_SECRET is unset on the Convex deployment, so",
+    "/relay/intel-history answers 401 to its own seeders), sectors, and digestNotifications,",
+    "which lost its Railway cron and has no Worker port. Each of those three needs something",
+    "only the Railway or Convex dashboard can supply, so the date buys the time to get it,",
+    "not permission to stop looking.",
+    "",
+    "2026-08-19, later the same day: two rows changed and both are recorded here rather than",
+    "acknowledged. euFsi:STALE_CONTENT came out of the list because ECB resumed the daily CISS",
+    "family; economic:fsi-eu:v1 now carries 259 observations through 2026-08-14, inside the",
+    "10-day content bound. The three intelHistoryIngest rows stop being ours the moment their",
+    "next cron ticks: RELAY_SHARED_SECRET is now set on the Convex prod deployment and",
+    "conflict:acled-intel recorded its first success ever at 15:30:10Z, consecutiveFailures 0.",
+    "The other two run every 6 hours and had not ticked when this was written."
+  ],
+  "expiresAt": "2026-09-18",
+  "acknowledged": [
+    {
+      "name": "chinaCoverage",
+      "status": "CHINA_DEGRADED",
+      "issue": 14,
+      "reason": "The seed is fresh; the verdict is about content. Measured 2026-08-19: health:china-coverage:v1 was evaluated minutes before the check, covering 17 sources with 15 launched, 13 healthy. Four sources hold the degraded verdict, and each has its own answer. energy.jodi-oil and energy.jodi-gas read blocked because they were never launched. aviation.china-hubs reads unavailable for the same reason as the flightDelays row: seed-aviation is unscheduled while the AviationStack key stays on the free tier. macro.china-snapshot is the only real one, and even there transport is fresh at 1599 minutes while content is stale at 71200 minutes against a 64800 bound, so the upstream publication is roughly four days past its own window rather than our fetch failing. CHINA_DEGRADED is the honest reading of that mix, not a seed fault."
+    },
+    {
+      "name": "chokepointTransits",
+      "status": "STALE_SEED",
+      "issue": 86,
+      "reason": "AISStream accepts the WebSocket and the subscribe frame, then sends nothing. Measured 2026-08-19 on a freshly issued key and the existing one: 0 messages in 25s on both, including with the relay's exact FilterMessageTypes frame. Neither key is rejected. The 30-minute gate is a correct 3x floor over the 10-minute relay, and the relay refuses to publish zeros, so the last good records keep serving while the age climbs. Vendor outage, in beta with no SLA; nothing here fixes it. Prune once a probe returns position reports."
+    },
+    {
+      "name": "climateDisasters",
+      "status": "COVERAGE_PARTIAL",
+      "issue": 82,
+      "reason": "ReliefWeb returns nothing until they approve an appname for us; the seed publishes on the natural-events half alone and now says so in coverage. Blocked on their reply, not on us. Prune this once RELIEFWEB_APPNAME is set and coverage reads ok. Re-verified 2026-08-19: api.reliefweb.int answers 403 AccessDeniedHttpException, \"You are not using an approved appname. Kindly request an appname from ReliefWeb here: https://apidoc.reliefweb.int/parameters#appname\". Still their reply we are waiting on."
+    },
+    {
+      "name": "consumerPricesCategories",
+      "status": "EMPTY",
+      "issue": 19,
+      "reason": "Nothing runs this seed. scripts/seed-consumer-prices.mjs needs CONSUMER_PRICES_CORE_API_KEY and its base URL, neither of which the Worker holds, so worker/seeds/registry.ts leaves it off every cron. Its header records the mapping, measured 2026-08-05: this one script owns six aggregate checks plus seven per-country slices, which is why one missing key shows up as thirteen rows. Credential-blocked, not broken. It clears when the key is supplied and the seed is scheduled, and not before."
+    },
+    {
+      "name": "consumerPricesCoverage",
+      "status": "EMPTY",
+      "issue": 20,
+      "reason": "Nothing runs this seed. scripts/seed-consumer-prices.mjs needs CONSUMER_PRICES_CORE_API_KEY and its base URL, neither of which the Worker holds, so worker/seeds/registry.ts leaves it off every cron. Its header records the mapping, measured 2026-08-05: this one script owns six aggregate checks plus seven per-country slices, which is why one missing key shows up as thirteen rows. Credential-blocked, not broken. It clears when the key is supplied and the seed is scheduled, and not before."
+    },
+    {
+      "name": "consumerPricesCoverageAU",
+      "status": "EMPTY",
+      "issue": 21,
+      "reason": "Nothing runs this seed. scripts/seed-consumer-prices.mjs needs CONSUMER_PRICES_CORE_API_KEY and its base URL, neither of which the Worker holds, so worker/seeds/registry.ts leaves it off every cron. Its header records the mapping, measured 2026-08-05: this one script owns six aggregate checks plus seven per-country slices, which is why one missing key shows up as thirteen rows. Credential-blocked, not broken. It clears when the key is supplied and the seed is scheduled, and not before."
+    },
+    {
+      "name": "consumerPricesCoverageBR",
+      "status": "EMPTY",
+      "issue": 22,
+      "reason": "Nothing runs this seed. scripts/seed-consumer-prices.mjs needs CONSUMER_PRICES_CORE_API_KEY and its base URL, neither of which the Worker holds, so worker/seeds/registry.ts leaves it off every cron. Its header records the mapping, measured 2026-08-05: this one script owns six aggregate checks plus seven per-country slices, which is why one missing key shows up as thirteen rows. Credential-blocked, not broken. It clears when the key is supplied and the seed is scheduled, and not before."
+    },
+    {
+      "name": "consumerPricesCoverageGB",
+      "status": "EMPTY",
+      "issue": 23,
+      "reason": "Nothing runs this seed. scripts/seed-consumer-prices.mjs needs CONSUMER_PRICES_CORE_API_KEY and its base URL, neither of which the Worker holds, so worker/seeds/registry.ts leaves it off every cron. Its header records the mapping, measured 2026-08-05: this one script owns six aggregate checks plus seven per-country slices, which is why one missing key shows up as thirteen rows. Credential-blocked, not broken. It clears when the key is supplied and the seed is scheduled, and not before."
+    },
+    {
+      "name": "consumerPricesCoverageIN",
+      "status": "EMPTY",
+      "issue": 24,
+      "reason": "Nothing runs this seed. scripts/seed-consumer-prices.mjs needs CONSUMER_PRICES_CORE_API_KEY and its base URL, neither of which the Worker holds, so worker/seeds/registry.ts leaves it off every cron. Its header records the mapping, measured 2026-08-05: this one script owns six aggregate checks plus seven per-country slices, which is why one missing key shows up as thirteen rows. Credential-blocked, not broken. It clears when the key is supplied and the seed is scheduled, and not before."
+    },
+    {
+      "name": "consumerPricesCoverageSA",
+      "status": "EMPTY",
+      "issue": 25,
+      "reason": "Nothing runs this seed. scripts/seed-consumer-prices.mjs needs CONSUMER_PRICES_CORE_API_KEY and its base URL, neither of which the Worker holds, so worker/seeds/registry.ts leaves it off every cron. Its header records the mapping, measured 2026-08-05: this one script owns six aggregate checks plus seven per-country slices, which is why one missing key shows up as thirteen rows. Credential-blocked, not broken. It clears when the key is supplied and the seed is scheduled, and not before."
+    },
+    {
+      "name": "consumerPricesCoverageSG",
+      "status": "EMPTY",
+      "issue": 26,
+      "reason": "Nothing runs this seed. scripts/seed-consumer-prices.mjs needs CONSUMER_PRICES_CORE_API_KEY and its base URL, neither of which the Worker holds, so worker/seeds/registry.ts leaves it off every cron. Its header records the mapping, measured 2026-08-05: this one script owns six aggregate checks plus seven per-country slices, which is why one missing key shows up as thirteen rows. Credential-blocked, not broken. It clears when the key is supplied and the seed is scheduled, and not before."
+    },
+    {
+      "name": "consumerPricesCoverageUS",
+      "status": "EMPTY",
+      "issue": 27,
+      "reason": "Nothing runs this seed. scripts/seed-consumer-prices.mjs needs CONSUMER_PRICES_CORE_API_KEY and its base URL, neither of which the Worker holds, so worker/seeds/registry.ts leaves it off every cron. Its header records the mapping, measured 2026-08-05: this one script owns six aggregate checks plus seven per-country slices, which is why one missing key shows up as thirteen rows. Credential-blocked, not broken. It clears when the key is supplied and the seed is scheduled, and not before."
+    },
+    {
+      "name": "consumerPricesFreshness",
+      "status": "EMPTY",
+      "issue": 28,
+      "reason": "Nothing runs this seed. scripts/seed-consumer-prices.mjs needs CONSUMER_PRICES_CORE_API_KEY and its base URL, neither of which the Worker holds, so worker/seeds/registry.ts leaves it off every cron. Its header records the mapping, measured 2026-08-05: this one script owns six aggregate checks plus seven per-country slices, which is why one missing key shows up as thirteen rows. Credential-blocked, not broken. It clears when the key is supplied and the seed is scheduled, and not before."
+    },
+    {
+      "name": "consumerPricesMovers",
+      "status": "EMPTY",
+      "issue": 29,
+      "reason": "Nothing runs this seed. scripts/seed-consumer-prices.mjs needs CONSUMER_PRICES_CORE_API_KEY and its base URL, neither of which the Worker holds, so worker/seeds/registry.ts leaves it off every cron. Its header records the mapping, measured 2026-08-05: this one script owns six aggregate checks plus seven per-country slices, which is why one missing key shows up as thirteen rows. Credential-blocked, not broken. It clears when the key is supplied and the seed is scheduled, and not before."
+    },
+    {
+      "name": "consumerPricesOverview",
+      "status": "EMPTY",
+      "issue": 30,
+      "reason": "Nothing runs this seed. scripts/seed-consumer-prices.mjs needs CONSUMER_PRICES_CORE_API_KEY and its base URL, neither of which the Worker holds, so worker/seeds/registry.ts leaves it off every cron. Its header records the mapping, measured 2026-08-05: this one script owns six aggregate checks plus seven per-country slices, which is why one missing key shows up as thirteen rows. Credential-blocked, not broken. It clears when the key is supplied and the seed is scheduled, and not before."
+    },
+    {
+      "name": "consumerPricesSpread",
+      "status": "EMPTY",
+      "issue": 31,
+      "reason": "Nothing runs this seed. scripts/seed-consumer-prices.mjs needs CONSUMER_PRICES_CORE_API_KEY and its base URL, neither of which the Worker holds, so worker/seeds/registry.ts leaves it off every cron. Its header records the mapping, measured 2026-08-05: this one script owns six aggregate checks plus seven per-country slices, which is why one missing key shows up as thirteen rows. Credential-blocked, not broken. It clears when the key is supplied and the seed is scheduled, and not before."
+    },
+    {
+      "name": "crossStraitActivityJapanMod",
+      "status": "SEED_ERROR",
+      "issue": 88,
+      "reason": "www.mod.go.jp refuses this network. Measured 2026-08-20 21:41Z with a current desktop Chrome user agent, both adapter URLs answered 403: https://www.mod.go.jp/js/press/index-en.html and https://www.mod.go.jp/js/. Earlier notes blamed the English index alone; the Japanese index answers the same way now. Last successful fetch 2026-08-19 23:16Z. Re-running scripts/seed-cross-strait-activity.mjs does not clear it: the run reports state=OK but writes an unavailable seed-meta that preserves lastSuccessAt, so age tracks the clock (read 1341m, then 1343m two minutes later, across a successful reseed). api/health.js already carves this row out of the fleet-wide sourceBlocked-to-SEED_ERROR rule, but SOURCE_BLOCKED also requires seedStale!==true, so the carve-out only covers a block shorter than the 720m ceiling and this one is past 22h. Upstream block, not a seed fault."
+    },
+    {
+      "name": "cyberThreats",
+      "status": "EMPTY",
+      "issue": 32,
+      "reason": "Nothing runs this seed. scripts/seed-cyber-threats.mjs needs ABUSEIPDB_API_KEY, OTX_API_KEY and URLHAUS_AUTH_KEY, none of which the Worker holds, so worker/seeds/registry.ts deliberately leaves it off every cron, and the relay's own cyber loop was disabled to stop it burning duplicate AbuseIPDB calls. Measured 2026-08-19: cyber:threats-bootstrap:v2 and seed-meta:cyber:threats are both absent. This is credential-blocked, not broken. It clears when the three keys are supplied and the seed is scheduled, and not before."
+    },
+    {
+      "name": "defensePatents",
+      "status": "EMPTY",
+      "issue": 33,
+      "reason": "Nothing runs this seed, though its bundle does. Measured 2026-08-19: patents:defense:latest and seed-meta:military:defense-patents are both absent. scripts/seed-bundle-static-ref.mjs is scheduled at `0 3 * * SUN`, but its Defense-Patents member declares requiredEnv [USPTO_API_KEY], and the Worker holds no USPTO key, so the member is skipped while the rest of the bundle runs. Credential-blocked, not broken."
+    },
+    {
+      "name": "digestNotifications",
+      "status": "EMPTY",
+      "issue": 34,
+      "reason": "Nothing runs this seed on Cloudflare. seed-meta:digest:last-run is written by scripts/seed-digest-notifications.mjs, which worker/seeds/registry.ts lists among the jobs that are `each its own port` and therefore never scheduled with the seed containers. The 90-minute bound was sized for a Railway cron every 30 minutes; that Railway service is gone and nothing replaced it. Measured 2026-08-19: the key is absent. It clears when the digest gets a port of its own on the Worker, not by changing the bound."
+    },
+    {
+      "name": "flightDelays",
+      "status": "EMPTY",
+      "issue": 37,
+      "reason": "Nothing runs this seed. All three aviation rows come from scripts/seed-aviation.mjs (flightDelays reads seed-meta:aviation:faa, notamClosures seed-meta:aviation:notam, intlDelays seed-meta:aviation:intl). AVIATIONSTACK_API arrived 2026-08-10 but on the free tier: 100 calls a month against roughly 55 calls per refresh, so a single day of scheduling would exhaust the month. ICAO_API_KEY is a trial quota with the same problem. The user chose to stay on the free tier, so worker/seeds/registry.ts keeps the script unscheduled. This is a deliberate cost decision, not a fault, and it also accounts for the aviation.china-hubs source reading unavailable inside the chinaCoverage row."
+    },
+    {
+      "name": "forecastBets",
+      "status": "STALE_SEED",
+      "issue": 38,
+      "reason": "Working as designed. seed-meta:forecast:bets is written by scripts/seed-forecast-bets.mjs, a shadow bet engine gated behind FORECAST_BETS_ENSEMBLE=1 that never writes the user-facing forecast:predictions:v2 key. worker/seeds/registry.ts leaves it unscheduled on purpose. Measured 2026-08-19: the key is absent, which is what an unscheduled shadow engine looks like. Nothing user-facing depends on it."
+    },
+    {
+      "name": "groceryBasket",
+      "status": "EMPTY",
+      "issue": 40,
+      "reason": "Nothing runs this seed. scripts/seed-grocery-basket.mjs needs FIRECRAWL_API_KEY on top of the Exa key, and no Firecrawl credential exists here, so worker/seeds/registry.ts leaves it unscheduled. Its sibling seed-bigmac left the same group on 2026-08-12 once a working Exa key arrived, because bigmac needs nothing else; grocery-basket still does. Credential-blocked, not broken."
+    },
+    {
+      "name": "intelHistoryIngestEnergyIntelligence",
+      "status": "SEED_ERROR",
+      "issue": 43,
+      "reason": "The ingest POST was refused with http_401 on every attempt since this seeder existed. Root cause found 2026-08-19: the Convex deployment had no RELAY_SHARED_SECRET, and intelRelayUnauthorized in convex/http.ts treats an empty configured secret as a rejection on purpose, so /relay/intel-history answered 401 to every caller including the right one. The variable was set on Convex prod on 2026-08-19 and the sibling row intelHistoryIngestConflictAcled recorded its first success ever at 15:30:10Z, which is what removed it from this file. This seeder runs on a 6h cron and had not ticked again when the fix landed, so its lastErrorCode is the old error held over rather than a fresh one; consecutiveFailures and lastSuccessAt are the live signal. Expected to clear on its next run. If it does not, the secret value is wrong rather than absent and reading the seeder-side value needs the Railway dashboard, which this machine has no token for."
+    },
+    {
+      "name": "intlDelays",
+      "status": "STALE_SEED",
+      "issue": 45,
+      "reason": "Nothing runs this seed. All three aviation rows come from scripts/seed-aviation.mjs (flightDelays reads seed-meta:aviation:faa, notamClosures seed-meta:aviation:notam, intlDelays seed-meta:aviation:intl). AVIATIONSTACK_API arrived 2026-08-10 but on the free tier: 100 calls a month against roughly 55 calls per refresh, so a single day of scheduling would exhaust the month. ICAO_API_KEY is a trial quota with the same problem. The user chose to stay on the free tier, so worker/seeds/registry.ts keeps the script unscheduled. This is a deliberate cost decision, not a fault, and it also accounts for the aviation.china-hubs source reading unavailable inside the chinaCoverage row."
+    },
+    {
+      "name": "newsThreatSummary",
+      "status": "STALE_SEED",
+      "issue": 53,
+      "reason": "Measured 2026-08-19: seed-meta:news:threat-summary is absent, and so is seed-meta:classify. One cause covers both. scripts/ais-relay.cjs seedClassify() reads CLASSIFY_LLM_PROVIDERS (ollama OLLAMA_API_URL, openrouter OPENROUTER_API_KEY, groq GROQ_API_KEY) and returns at `if (!hasAnyProvider)` with the log line `[Classify] Skipped — no LLM provider keys configured`. That return sits above both of its writes, so a relay with no LLM credential leaves two keys NULL rather than one. Only the Railway dashboard for service a5f66d97-217f-44a0-a42d-5f3b67752223 can say which of the three, if any, is set there. Credential-blocked, not broken."
+    },
+    {
+      "name": "notamClosures",
+      "status": "STALE_SEED",
+      "issue": 54,
+      "reason": "Nothing runs this seed. All three aviation rows come from scripts/seed-aviation.mjs (flightDelays reads seed-meta:aviation:faa, notamClosures seed-meta:aviation:notam, intlDelays seed-meta:aviation:intl). AVIATIONSTACK_API arrived 2026-08-10 but on the free tier: 100 calls a month against roughly 55 calls per refresh, so a single day of scheduling would exhaust the month. ICAO_API_KEY is a trial quota with the same problem. The user chose to stay on the free tier, so worker/seeds/registry.ts keeps the script unscheduled. This is a deliberate cost decision, not a fault, and it also accounts for the aviation.china-hubs source reading unavailable inside the chinaCoverage row."
+    },
+    {
+      "name": "pizzint",
+      "status": "EMPTY",
+      "issue": 55,
+      "reason": "Same relay failure as socialVelocity. Measured 2026-08-19: no intelligence:pizzint:seed:v1 and no seed-meta:intelligence:pizzint, on a 10-minute loop, while 17 sibling loops in the same process wrote inside their cadence. The seed reads https://www.pizzint.watch/api/dashboard-data, so an upstream change there is the first thing to rule out in the relay stderr (Railway service a5f66d97-217f-44a0-a42d-5f3b67752223)."
+    },
+    {
+      "name": "productCatalog",
+      "status": "EMPTY",
+      "issue": 57,
+      "reason": "Same relay failure as socialVelocity, and the last loop in the boot list. Measured 2026-08-19: no seed-meta:product-catalog at all. The seed reads Stripe prices, so an expired or absent Stripe key on the Railway service is the first thing to rule out (service a5f66d97-217f-44a0-a42d-5f3b67752223)."
+    },
+    {
+      "name": "riskScores",
+      "status": "COVERAGE_PARTIAL",
+      "issue": 59,
+      "reason": "Downstream of cyberThreats, not an independent failure. The CII loop is alive: seed-meta:intelligence:risk-scores was 14 minutes old when measured on 2026-08-19, inside its 45-minute bound. recordCount counts signal density across three families, conflict, news and cyber, and it reads 2 because the cyber family is empty, which is the credential block recorded against cyberThreats (#32). Prune this one when that one clears; there is no separate fix here."
+    },
+    {
+      "name": "sectors",
+      "status": "EMPTY",
+      "issue": 61,
+      "reason": "Measured 2026-08-19: seed-meta:market:sectors and market:sectors:v2 are both absent, while every sibling written by the same seedAllMarketDataOnce() pass is fresh inside a minute (commodities, gulf-quotes, etf-flows, crypto, stablecoins, crypto-sectors, token-panels, stocks). The loop runs and Upstash accepts writes, so the failure is inside seedSectorSummary() alone. Its only path that skips the write is the `sectors.length === 0` early return at scripts/ais-relay.cjs:2386, logging `[Market] No sector data fetched — skipping Redis write`. That needs Finnhub (FINNHUB_API_KEY) and the Yahoo chart fallback to both return nothing for all sector ETFs. Read the relay log for that line to tell a missing key from a blocked fetch. Narrowed 2026-08-19 22:10Z: the FINNHUB_API_KEY in .env.local answers 200 for the sector ETFs themselves (XLK 183.64, XLF 57.48, SMH 560.92 on /api/v1/quote), so the Finnhub side of that double failure is not the API refusing ETFs. The relay is alive at the same moment (seed-meta:intelligence:risk-scores seedAgeMin 1), so it is not a dead container either. That leaves the container's own environment: nixpacks.toml runs `node scripts/ais-relay.cjs` on Railway, docker-compose passes FINNHUB_API_KEY as \"${FINNHUB_API_KEY:-}\" which is empty when the deploy env does not set it, and Yahoo is the fallback that has to fail too. Reading the log or the Railway env settles it, and both need Railway access this session does not have. No GitHub seed writes market:sectors:v2 either: the registry's market entry is seed-market-quotes.mjs and seed-commodity-quotes.mjs, which is why the siblings look fresh while this one does not."
+    },
+    {
+      "name": "socialVelocity",
+      "status": "EMPTY",
+      "issue": 64,
+      "reason": "Relay loop runs, seed never succeeds. Measured 2026-08-19: 17 of the relay's boot seed loops wrote inside their cadence (market 18m, weather 9m, shipping-stress 14m, transits 229m), while socialVelocity, wsbTickers, climate-news, chokepoint-flows, pizzint and product-catalog have neither a data key nor a seed-meta key. startBootSeedLoop writes the meta only after a seed returns, so no meta at all means every attempt failed, not that the process is down. Next step is the relay's own stderr, which is in the Railway dashboard for service a5f66d97-217f-44a0-a42d-5f3b67752223; no Railway token exists on the dev machine, so this cannot be read from the repo."
+    },
+    {
+      "name": "telegramFeed",
+      "status": "EMPTY",
+      "issue": 66,
+      "reason": "The Telegram poll never completes a channel. Measured 2026-08-19: intelligence:telegram-feed:v1 and seed-meta:intelligence:telegram-feed:v1 are both absent. ais-relay.cjs writes those two keys only when channelsPolled > 0, and initTelegramClientIfNeeded returns false without a word for four separate reasons: TELEGRAM_ENABLED off, a missing TELEGRAM_API_ID / TELEGRAM_API_HASH / TELEGRAM_SESSION, the telegram package not installed in the image, and an AUTH_KEY_DUPLICATED session that disables the client permanently for the process. Only the relay's own stderr says which, and it prints '[Relay] Telegram client connected' on success. Read it in the Railway dashboard for service a5f66d97-217f-44a0-a42d-5f3b67752223; no Railway token exists on the dev machine, so this cannot be settled from the repo. If it is the last one, the fix is node scripts/telegram/session-auth.mjs and a new TELEGRAM_SESSION."
+    },
+    {
+      "name": "wsbTickers",
+      "status": "EMPTY",
+      "issue": 74,
+      "reason": "Same relay failure as socialVelocity, and the same subreddit fetch path. Measured 2026-08-19: no intelligence:wsb-tickers:v1 and no seed-meta:intelligence:wsb-tickers, while 17 sibling loops in the same process wrote inside their cadence. Read the relay stderr in the Railway dashboard (service a5f66d97-217f-44a0-a42d-5f3b67752223); the repo cannot reach it."
+    }
+  ]
+}

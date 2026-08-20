@@ -1,0 +1,158 @@
+---
+title: "身份验证与面板门控"
+description: "World Monitor 中用户身份验证、高级面板门控与服务端会话强制执行机制的完整技术说明：涵盖 Supabase 集成、Bearer Token 校验、权益检查与 Pro 订阅门控逻辑，确保仪表盘、API 与桌面应用的访问控制稳固可靠。"
+---
+
+WorldMonitor 使用 [Supabase](https://supabase.com) 进行身份验证，且与 sibt.ai
+共用同一个项目，因此一个账号在两个站点都可用。权益不会跨站点携带：权益按产品
+存放在 Convex 中。认证系统将高级面板置于登录与层级检查之后，并通过本地 JWT
+验证在服务端 API 端点上强制执行基于会话的访问控制。
+
+---
+
+## 认证技术栈
+
+| 层级 | 技术 | 用途 |
+|-------|-----------|---------|
+| 认证提供商 | Supabase | 登录（密码、Google）、会话管理 |
+| JWT 验证 | jose + Supabase JWKS | 服务端 Bearer Token 验证（无需往返请求） |
+| Convex 集成 | Supabase 访问令牌 | 使用 `applicationID: "authenticated"` 的 Convex 认证 |
+| 认证状态 | `auth-state.ts` | 响应式浏览器认证状态 |
+
+### 关键文件
+
+| 文件 | 用途 |
+|------|---------|
+| `convex/auth.config.ts` | Convex 认证提供商配置 — Supabase 签发方 + applicationID |
+| `src/services/supabase-client.ts` | 延迟加载的 supabase-js 客户端，读取两个 `VITE_SUPABASE_*` 值 |
+| `src/services/auth.ts` | `initAuth()`、`openSignIn()`、`signOut()`、`getAuthToken()` |
+| `src/services/auth-state.ts` | 响应式认证状态、会话水合 |
+| `src/components/AuthHeaderWidget.ts` | 头部登录按钮与账号菜单 |
+| `server/auth-session.ts` | 使用 jose + 缓存 JWKS 的服务端 JWT 验证 |
+
+---
+
+## 面板门控
+
+高级面板在用户满足访问要求之前，会显示 CTA 遮罩层而非内容。
+
+### 门控原因
+
+| 原因 | 用户所见 | 解决方式 |
+|--------|-------------------|------------|
+| `ANONYMOUS` | "登录以解锁" | 登录 |
+| `FREE_TIER` | "升级到 Pro" | 升级订阅 |
+| `NONE` | 正常面板内容 | 已解锁 |
+
+### 如何配置哪些面板为高级面板
+
+三个文件控制门控。**添加或移除高级面板时，三者必须保持同步。**
+
+#### 1. 面板配置 — `src/config/panels.ts`
+
+在相关变体的面板条目中添加 `premium: 'locked'`：
+
+```ts
+// In FULL_PANELS, FINANCE_PANELS, etc.
+'my-panel': { name: 'My Panel', enabled: true, premium: 'locked' }
+```
+
+#### 2. 客户端门控集合 — `src/app/panel-layout.ts`
+
+将面板键添加到 `WEB_PREMIUM_PANELS`：
+
+```ts
+const WEB_PREMIUM_PANELS = new Set([
+  'stock-analysis',
+  'stock-backtest',
+  'daily-market-brief',
+  'my-panel',  // <-- add here
+]);
+```
+
+此集合驱动响应式 UI 门控 — 当认证状态变化时，该集合中的面板会被检查，并相应地显示/隐藏 CTA。
+
+#### 3. 服务端 API 强制执行（如果面板调用高级 API）
+
+**客户端 Token 注入** — `src/services/runtime.ts`（`WEB_PREMIUM_API_PATHS`）：
+
+```ts
+const WEB_PREMIUM_API_PATHS = new Set([
+  '/api/market/v1/analyze-stock',
+  '/api/market/v1/get-stock-analysis-history',
+  '/api/market/v1/backtest-stock',
+  '/api/market/v1/list-stored-stock-backtests',
+  '/api/my-domain/v1/my-endpoint',  // <-- add here
+]);
+```
+
+当 fetch 请求匹配此集合中的路径且用户已登录时，客户端会注入 `Authorization: Bearer <token>`。
+
+**服务端网关** — `server/gateway.ts`（`PREMIUM_RPC_PATHS`）：
+
+```ts
+const PREMIUM_RPC_PATHS = new Set([
+  '/api/market/v1/analyze-stock',
+  '/api/market/v1/get-stock-analysis-history',
+  '/api/market/v1/backtest-stock',
+  '/api/market/v1/list-stored-stock-backtests',
+  '/api/my-domain/v1/my-endpoint',  // <-- add here
+]);
+```
+
+网关先对 Bearer Token 做 JWKS 验证，再读取调用方在 Convex 中的权益记录。若该
+记录未达到端点要求的层级，则返回 403。
+
+### 当前受门控的面板
+
+| 面板 | 变体 | 门控类型 |
+|-------|----------|-----------|
+| `stock-analysis` | full, finance | `locked`（Web） |
+| `stock-backtest` | full, finance | `locked`（Web） |
+| `daily-market-brief` | full, finance | `locked`（Web） |
+
+### 桌面端行为
+
+在 Tauri 钥匙串中拥有有效 `WORLDMONITOR_API_KEY` 的桌面端用户可绕过所有面板门控。现有的 API 密钥流程不受影响 — Bearer Token 是**第二条认证路径**，而非替代方案。
+
+---
+
+## 服务端会话强制执行
+
+Cloudflare Worker 网关为高级端点接受两种形式的身份验证：
+
+1. **静态 API 密钥** — `X-WorldMonitor-Key` 头（现有流程，未变更）
+2. **Bearer Token** — `Authorization: Bearer <access_token>`（用于 Web 用户）
+
+网关首先尝试 API 密钥。如果在高级端点上失败，则回退到 `server/auth-session.ts`
+的 Bearer Token 校验。JWT 验证依据：
+
+- **签发方**：`SUPABASE_JWT_ISSUER`
+- **受众**：`authenticated` — Supabase 在每个访问令牌上都写入这个固定字符串
+- **签名**：ES256 或 RS256，对照 `<issuer>/.well-known/jwks.json`
+
+对称算法一律拒绝：JWKS 只发布公钥，接受对称算法就会打开算法混淆伪造的口子。
+
+非高级端点不需要来自 Web 来源的任何身份验证。
+
+---
+
+## 环境变量
+
+| 变量 | 位置 | 用途 |
+|----------|-------|---------|
+| `SUPABASE_JWT_ISSUER` | Convex + Worker | 用于 JWT 验证的签发方 URL |
+| `VITE_SUPABASE_URL` | 客户端构建 | Supabase 项目 URL |
+| `VITE_SUPABASE_ANON_KEY` | 客户端构建 | Supabase 可公开的 anon 密钥 |
+
+---
+
+## 用户角色
+
+令牌本身不授予 Pro。Supabase 唯一的按用户令牌存储是 `user_metadata`，其官方文档
+称该字段"用户可随意修改且不做任何检查"，因此 `validateBearerToken` 把每个通过
+验证的会话都报告为 `free`，也从不读取 plan 声明。Convex 中的权益记录是唯一的
+依据，客户端与服务端一致。
+
+在客户端，`getAuthState().user?.role` 暴露该角色。`isProUser()` 和
+`hasPremiumAccess()` 都会检查此值以及 API 密钥门控。

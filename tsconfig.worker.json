@@ -1,0 +1,50 @@
+{
+  // The Worker sources and their tests. The root tsconfig includes only `src`
+  // and tsconfig.api.json only `api`, `src/generated` and `server`, so nothing
+  // under worker/ or tests/ was ever typechecked — a deliberate type error in
+  // worker/ passed both `tsc --noEmit` and `tsc -p tsconfig.api.json`.
+  //
+  // Vitest transpiles without typechecking, so the test run does not cover
+  // this either. This config is the only gate on worker/ types.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-pool-workers/types"]
+  },
+  // Plan 4d, Task 1: widened from a single ambient file (server/env.d.ts) to
+  // the whole `server` dir plus its live import graph. worker/routes/domains.ts
+  // imports server/gateway.ts directly, so the entire shared gateway
+  // surface needs to typecheck under @cloudflare/workers-types, not just
+  // against vite/client (all typecheck:api checked before).
+  //
+  // `src/generated` (sebuf-codegen route tables) is included alongside
+  // `server` for the same reason: it is in server/gateway.ts's live import
+  // graph, and a type error there would otherwise pass silently the same way
+  // the comment at the top of this file describes for worker/.
+  //
+  // `src/shared` is scoped to the two files server/gateway.ts actually
+  // imports (public-rpc-cache.ts, premium-paths.ts) instead of the whole
+  // directory: sibling files in that same directory (the *-registry-store.ts
+  // files) import `@/services/bootstrap`, which pulls in the entire
+  // frontend app graph (DeckGLMap, clerk, i18n, ImportMeta.env-dependent
+  // modules...) — none of which server/gateway.ts touches, and none of which
+  // typecheck under this file's `types` (no `vite/client` here).
+  //
+  // `api` is deliberately NOT included as a directory: server/gateway.ts and
+  // server/_shared/* import a handful of api/_*.js files (_api-key.js,
+  // _crypto.js, _sentry-edge.js, _session.js, _sentry-common.js,
+  // _rate-limit-fallback.js, _upstash-json.js, _seed-envelope.js,
+  // _wildfire-dashboard.js) — none of which have `allowJs` on, so listing
+  // `api` as an include root does not typecheck their contents; it only pulls
+  // in unrelated sibling .ts files (api/create-checkout.ts,
+  // api/customer-portal.ts, api/notification-channels.ts, api/notify.ts, ...)
+  // as new root files with real, irrelevant Stripe/notification-webhook type
+  // errors under workers-types. The .js files above are already reached and
+  // checked (to the extent allowJs allows) as ordinary dependencies of
+  // `server`, with no include entry needed.
+  //
+  // `server/__tests__/**` is excluded, mirroring tsconfig.api.json: those
+  // test files are not part of server/gateway.ts's import graph (they import
+  // it, not the reverse) and were never in scope for this widening.
+  "include": ["worker", "tests/worker", "tests/counters", "tests/ais-relay", "worker-configuration.d.ts", "server", "src/generated", "src/shared/public-rpc-cache.ts", "src/shared/premium-paths.ts"],
+  "exclude": ["server/__tests__/**"]
+}
