@@ -1,0 +1,923 @@
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { readdirSync, readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { describe, it } from 'node:test';
+import { fileURLToPath } from 'node:url';
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const workflowsDir = resolve(root, '.github/workflows');
+const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8')) as {
+  scripts?: Record<string, string>;
+};
+const packageScripts = packageJson.scripts ?? {};
+const read = (p: string) => readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
+
+const deployGateWorkflow = read(resolve(workflowsDir, 'deploy-gate.yml'));
+const securityAuditWorkflow = read(resolve(workflowsDir, 'security-audit.yml'));
+const securityAuditScript = read(resolve(root, '.github/scripts/audit-production-dependencies.mjs'));
+const testWorkflow = read(resolve(workflowsDir, 'test.yml'));
+const desktopBuildWorkflow = read(resolve(workflowsDir, 'build-desktop.yml'));
+const desktopCanaryWorkflow = read(resolve(workflowsDir, 'test-linux-app.yml'));
+const lintCodeWorkflow = read(resolve(workflowsDir, 'lint-code.yml'));
+const workflowText = readdirSync(workflowsDir)
+  .filter((name) => name.endsWith('.yml') || name.endsWith('.yaml'))
+  .map((name) => read(resolve(workflowsDir, name)))
+  .join('\n');
+
+const REQUIRED_PR_SCRIPTS = [
+  'test:data',
+  'test:sidecar',
+  'test:convex',
+  'test:e2e:mcp-grant',
+  'test:e2e:variant-smoke:full',
+  'test:resilience-validation-smoke',
+] as const;
+
+const REQUIRED_TEST_JOBS = [
+  'unit',
+  'sidecar',
+  'convex-tests',
+  'variant-smoke-full',
+  'resilience-validation-smoke',
+  'desktop-config',
+  'desktop-rust',
+] as const;
+
+const TIMEOUT_CAPPED_TEST_JOBS = [
+  'consumer-prices',
+  'sidecar',
+  'convex-tests',
+  'variant-smoke-full',
+  'resilience-validation-smoke',
+  'desktop-config',
+  'desktop-rust',
+] as const;
+
+const REQUIRED_GATE_WORKFLOWS = ['Test', 'Typecheck', 'Lint Code', 'Security Audit'] as const;
+
+const REQUIRED_NON_TEST_GATE_CHECKS = [
+  'typecheck',
+  'biome',
+  'public-docs',
+  'security-audit',
+] as const;
+
+// Jobs the deploy gate cannot require under their own name, and the check that
+// blocks on their behalf instead. A matrix job publishes one check run per
+// matrix entry (`audit-lockfile (root)`, `audit-lockfile (scripts)`, …) and
+// never the bare job id, so listing the id in `required` would leave the gate
+// waiting on a check run that is never published — pending forever, which
+// deadlocks every PR. The `if: always()` aggregate job publishes the single
+// blocking check for the whole matrix instead.
+//
+// An entry here is honoured only when both halves still hold: the job's `name:`
+// is a template expression (so it structurally cannot be matched by id), and
+// the covering check is itself a required gate check. That keeps this table
+// from becoming a way to quietly drop a job out of the gate.
+const GATE_CHECK_EXEMPTIONS: Record<string, { workflow: string; coveredBy: string }> = {
+  'audit-lockfile': { workflow: 'Security Audit', coveredBy: 'security-audit' },
+};
+
+const REQUIRED_RESILIENCE_VALIDATION_INPUTS = [
+  'Dockerfile.seed-bundle-resilience-validation',
+  'docs/methodology/country-resilience-index/validation/',
+  'scripts/benchmark-resilience-external.mjs',
+  'scripts/backtest-resilience-outcomes.mjs',
+  'scripts/validate-resilience-sensitivity.mjs',
+  'scripts/seed-bundle-resilience-validation.mjs',
+  'scripts/_bundle-runner.mjs',
+] as const;
+
+// Desktop drift gates (#5902): the literal awk patterns each change filter
+// must keep, so a filter refactor cannot silently un-gate a desktop-breaking
+// path class (the exact drift class #5902 exists to close).
+const REQUIRED_DESKTOP_CONFIG_INPUTS = [
+  'src-tauri/',
+  'package.json',
+  'scripts/repack-linux-appimage.sh',
+  'scripts/sync-desktop-version.mjs',
+  'scripts/check-desktop-build-env.mjs',
+  'scripts/check-rust-security-floors.mjs',
+] as const;
+
+const REQUIRED_DESKTOP_RUST_INPUTS = [
+  'src-tauri/sidecar/',
+  'src-tauri/',
+  '.github/workflows/test.yml',
+] as const;
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function workflowRegexNeedle(path: string): string {
+  return path.replaceAll('/', '\\/').replaceAll('.', '\\.');
+}
+
+function shellAwkAssignmentBlock(variable: string): string {
+  const start = `${variable}=$(echo "$FILES" | awk '`;
+  const startIndex = testWorkflow.indexOf(start);
+  assert.notEqual(startIndex, -1, `test.yml must define ${variable}`);
+  const end = "\n          ')";
+  const endIndex = testWorkflow.indexOf(end, startIndex);
+  assert.notEqual(endIndex, -1, `test.yml must terminate ${variable}`);
+  return testWorkflow.slice(startIndex, endIndex + end.length);
+}
+
+function testJobBlock(job: string): string {
+  const match = testWorkflow.match(new RegExp(`\\n  ${escapeRegExp(job)}:\\n[\\s\\S]*?(?=\\n  [\\w-]+:\\n|\\n$)`));
+  assert.ok(match, `test.yml must define ${job}`);
+  return match[0];
+}
+
+function workflowJobBlock(workflow: string, job: string): string {
+  const match = workflow.match(new RegExp(`\\n  ${escapeRegExp(job)}:\\n[\\s\\S]*?(?=\\n  [\\w-]+:\\n|\\n$)`));
+  assert.ok(match, `workflow must define ${job}`);
+  return match[0];
+}
+
+function workflowStepBlock(workflow: string, stepName: string): string {
+  const marker = `\n      - name: ${stepName}\n`;
+  const startIndex = workflow.indexOf(marker);
+  assert.notEqual(startIndex, -1, `workflow must define step ${stepName}`);
+  const nextStepIndex = workflow.indexOf('\n      - ', startIndex + marker.length);
+  return workflow.slice(startIndex, nextStepIndex === -1 ? workflow.length : nextStepIndex);
+}
+
+function workflowRunScript(stepBlock: string): string {
+  const marker = '\n        run: |\n';
+  const startIndex = stepBlock.indexOf(marker);
+  assert.notEqual(startIndex, -1, 'workflow step must have a block run script');
+  return stepBlock
+    .slice(startIndex + marker.length)
+    .split('\n')
+    .map((line) => line.replace(/^ {10}/, ''))
+    .join('\n');
+}
+
+function runReleasePreflight(stepBlock: string, eventName: string, draft: string, value: string): void {
+  const script = workflowRunScript(stepBlock)
+    .replaceAll('${{ github.event_name }}', eventName)
+    .replaceAll('${{ github.event.inputs.draft }}', draft);
+  const names = [
+    'VITE_SUPABASE_URL',
+    'VITE_SUPABASE_ANON_KEY',
+    'VITE_WS_RELAY_URL',
+    'VITE_PMTILES_URL_PUBLIC',
+    'CONVEX_URL',
+  ];
+  const env = Object.fromEntries(names.map((name) => [name, value]));
+  execFileSync('bash', ['-e', '-o', 'pipefail', '-c', script], { env, encoding: 'utf8' });
+}
+
+function evaluateDesktopConfigFilter(filter: string, files: string[]): string {
+  const fileArgs = files.map((file) => JSON.stringify(file)).join(' ');
+  const script = `FILES=$(printf '%s\\n' ${fileArgs}); ${filter}; printf '%s' "$DESKTOP_CONFIG"`;
+  return execFileSync('bash', ['-euo', 'pipefail', '-c', script], { encoding: 'utf8' }).trim();
+}
+
+function workflowJobNames(workflow: string, label: string): string[] {
+  const jobs: string[] = [];
+  let inJobs = false;
+
+  for (const line of workflow.split('\n')) {
+    if (/^jobs:\s*$/.test(line)) {
+      inJobs = true;
+      continue;
+    }
+    if (inJobs && /^\S[^:]*:\s*$/.test(line)) {
+      break;
+    }
+    const match = inJobs ? line.match(/^ {2}([A-Za-z0-9_-]+):(?:\s|$)/) : null;
+    if (match?.[1]) {
+      jobs.push(match[1]);
+    }
+  }
+
+  assert.ok(jobs.length > 0, `${label} must define at least one job under jobs:`);
+  return jobs;
+}
+
+// Maps a workflow's display name (`name:` at column 0) to its source, so the
+// gate checks below key off the same names deploy-gate.yml's `workflow_run`
+// trigger uses rather than a hand-maintained name-to-filename table.
+//
+// Two workflows sharing a display name would make this map silently keep one
+// and drop the other, so the checks below could pass while the dropped
+// workflow's jobs gate nothing. `workflow_run` matches by name too, so the
+// ambiguity is real for the gate, not just for this test — fail on it here.
+function gatedWorkflowSources(): Map<string, string> {
+  const byName = new Map<string, string>();
+  const filesByName = new Map<string, string>();
+
+  for (const file of readdirSync(workflowsDir).filter((n) => n.endsWith('.yml') || n.endsWith('.yaml'))) {
+    const source = read(resolve(workflowsDir, file));
+    const name = source.match(/^name:\s*(.+)$/m)?.[1]?.trim().replace(/^['"]|['"]$/g, '');
+    if (!name) continue;
+
+    assert.ok(
+      !filesByName.has(name),
+      `workflows must have unique names; ${filesByName.get(name)} and ${file} are both named "${name}", so workflow_run and the deploy gate cannot tell them apart`,
+    );
+    filesByName.set(name, file);
+    byName.set(name, source);
+  }
+
+  return byName;
+}
+
+// The check-run name GitHub publishes for a job: its `name:` override when it
+// has one, otherwise the job id. A `name:` containing a `${{ … }}` expression
+// (matrix fan-out) resolves per matrix entry, so no single literal name exists
+// for the gate to match.
+function effectiveCheckName(workflow: string, job: string): { name: string; templated: boolean } {
+  const nameOverride = workflowJobBlock(workflow, job).match(/^ {4}name:\s*(.+)$/m)?.[1];
+  if (!nameOverride) {
+    return { name: job, templated: false };
+  }
+
+  const value = nameOverride.trim().replace(/^['"]|['"]$/g, '');
+  return { name: value, templated: value.includes('${{') };
+}
+
+function parseJsonArrayLiteral(source: string, regex: RegExp, label: string): string[] {
+  const match = source.match(regex);
+  assert.ok(match?.[1], `deploy-gate.yml must define ${label}`);
+  const parsed = JSON.parse(match[1]);
+  assert.ok(Array.isArray(parsed), `${label} must be a JSON array`);
+  for (const value of parsed) {
+    assert.equal(typeof value, 'string', `${label} entries must be strings`);
+  }
+  return parsed;
+}
+
+function deployGateRequiredChecks(): string[] {
+  return parseJsonArrayLiteral(deployGateWorkflow, /\n\s*required='(\[[^\n]+])'/, 'required checks');
+}
+
+function deployGateWorkflowRunNames(): string[] {
+  return parseJsonArrayLiteral(deployGateWorkflow, /workflows:\s*(\[[^\n]+])/, 'workflow_run workflows');
+}
+
+function collectPackageLockfiles(): string[] {
+  return execFileSync('git', ['ls-files', '*package-lock.json'], { cwd: root, encoding: 'utf8' })
+    .split('\n')
+    .filter(Boolean)
+    .sort();
+}
+
+function collectDockerfiles(): string[] {
+  return execFileSync('git', ['ls-files', '*Dockerfile*'], { cwd: root, encoding: 'utf8' })
+    .split('\n')
+    .filter((file) => /(^|\/)Dockerfile(\.|$)/.test(file))
+    .sort();
+}
+
+function securityAuditMatrixLockfiles(): string[] {
+  return Array.from(securityAuditWorkflow.matchAll(/^\s+lockfile:\s+(.+)$/gm), ([, value]) =>
+    value.trim().replace(/^['"]|['"]$/g, ''),
+  ).sort();
+}
+
+describe('CI workflow coverage', () => {
+  it('runs the public documentation boundary on docs-only pull requests', () => {
+    const publicDocsJob = workflowJobBlock(lintCodeWorkflow, 'public-docs');
+
+    assert.match(publicDocsJob, /npm run lint:public-docs/);
+    assert.doesNotMatch(publicDocsJob, /needs: changes/);
+  });
+
+  it('keeps required PR smoke scripts defined and wired into workflows', () => {
+    for (const script of REQUIRED_PR_SCRIPTS) {
+      assert.equal(typeof packageScripts[script], 'string', `package.json must define ${script}`);
+      assert.match(
+        workflowText,
+        new RegExp(`npm\\s+run\\s+${escapeRegExp(script)}(?:\\s|$)`),
+        `A workflow must run npm run ${script}`,
+      );
+    }
+  });
+
+  it('keeps the main Test workflow jobs for defensibility smoke gates', () => {
+    for (const job of REQUIRED_TEST_JOBS) {
+      assert.match(testWorkflow, new RegExp(`\\n  ${escapeRegExp(job)}:\\n`), `test.yml must define ${job}`);
+    }
+  });
+
+  it('keeps required smoke jobs capped with explicit timeouts', () => {
+    for (const job of TIMEOUT_CAPPED_TEST_JOBS) {
+      assert.match(testJobBlock(job), /\n {4}timeout-minutes: \d+\n/, `${job} must set timeout-minutes`);
+    }
+  });
+
+  it('keeps the deploy gate wired to every Test workflow check job', () => {
+    const workflowRunNames = deployGateWorkflowRunNames();
+    const requiredChecks = deployGateRequiredChecks();
+
+    for (const workflowName of REQUIRED_GATE_WORKFLOWS) {
+      assert.ok(
+        workflowRunNames.includes(workflowName),
+        `deploy-gate.yml must run after ${workflowName} completes`,
+      );
+    }
+    for (const job of workflowJobNames(testWorkflow, 'test.yml')) {
+      assert.ok(
+        requiredChecks.includes(job),
+        `deploy-gate.yml must require every test.yml job; missing ${job}`,
+      );
+    }
+    for (const check of REQUIRED_NON_TEST_GATE_CHECKS) {
+      assert.ok(requiredChecks.includes(check), `deploy-gate.yml must require ${check}`);
+    }
+    assert.match(
+      deployGateWorkflow,
+      /All required PR gates passed/,
+      'deploy-gate.yml success status must describe the full gate set',
+    );
+    assert.doesNotMatch(
+      deployGateWorkflow,
+      /unit \+ typecheck/i,
+      'deploy-gate.yml must not regress to the old unit+typecheck-only gate',
+    );
+  });
+
+  // #5402: `sidecar` runs in CI but is not one of branch protection's four
+  // required contexts (biome, typecheck, unit, gate). It blocks merge anyway,
+  // because the required `gate` context aggregates it — but only because
+  // someone remembered to list it. Nothing forced that, and the same omission
+  // is invisible for every other job: a job absent from `required` is simply
+  // never inspected, so it reports red on the PR and the gate still goes green.
+  // The check below covers every workflow the gate aggregates, not just
+  // test.yml, so a new job cannot land in an advisory-only state.
+  it('requires every job of every workflow the deploy gate aggregates', () => {
+    const requiredChecks = deployGateRequiredChecks();
+    const sources = gatedWorkflowSources();
+    const advisoryOnly: string[] = [];
+
+    for (const workflowName of REQUIRED_GATE_WORKFLOWS) {
+      const source = sources.get(workflowName);
+      assert.ok(source, `a workflow named ${workflowName} must exist for the deploy gate to aggregate it`);
+
+      for (const job of workflowJobNames(source, workflowName)) {
+        const { name, templated } = effectiveCheckName(source, job);
+        const exemption = GATE_CHECK_EXEMPTIONS[job];
+
+        if (exemption && exemption.workflow === workflowName) {
+          assert.ok(
+            templated,
+            `${workflowName}/${job} is exempt from the gate only because its check-run name is templated, but it publishes the literal name ${name} — require it directly instead`,
+          );
+          assert.ok(
+            requiredChecks.includes(exemption.coveredBy),
+            `${workflowName}/${job} is exempt because ${exemption.coveredBy} blocks on its behalf, so ${exemption.coveredBy} must itself be a required gate check`,
+          );
+          continue;
+        }
+
+        assert.ok(
+          !templated,
+          `${workflowName}/${job} publishes a per-matrix check-run name (${name}) that the gate cannot match, and has no GATE_CHECK_EXEMPTIONS entry naming the aggregate that covers it`,
+        );
+
+        if (!requiredChecks.includes(name)) {
+          advisoryOnly.push(`${workflowName}/${name}`);
+        }
+      }
+    }
+
+    assert.deepEqual(
+      advisoryOnly,
+      [],
+      `deploy-gate.yml must require every job of every workflow it aggregates. These run in CI but a red result does not block merge (#5402): ${advisoryOnly.join(', ')}`,
+    );
+  });
+
+  // The mirror-image failure of the check above, and the more disruptive one:
+  // a `required` entry that no job publishes never resolves, so the gate holds
+  // at "Waiting for required PR gates" on every PR until someone edits the
+  // workflow. Renaming or deleting a gated job must fail here, not in the queue.
+  it('keeps the deploy gate required list free of checks no gated workflow publishes', () => {
+    const sources = gatedWorkflowSources();
+    const published = new Set<string>();
+
+    for (const workflowName of REQUIRED_GATE_WORKFLOWS) {
+      const source = sources.get(workflowName);
+      assert.ok(source, `a workflow named ${workflowName} must exist for the deploy gate to aggregate it`);
+
+      for (const job of workflowJobNames(source, workflowName)) {
+        const { name, templated } = effectiveCheckName(source, job);
+        if (!templated) {
+          published.add(name);
+        }
+      }
+    }
+
+    const phantom = deployGateRequiredChecks().filter((check) => !published.has(check));
+
+    assert.deepEqual(
+      phantom,
+      [],
+      `deploy-gate.yml requires checks no gated workflow publishes, so the gate can never leave "pending": ${phantom.join(', ')}`,
+    );
+  });
+
+  // #5822: the gate matches check runs by name alone, then keeps only the one
+  // that finished last. Two jobs publishing the same name — in different
+  // workflows or the same one — collapse to that single run and the others'
+  // conclusions are discarded, so a failure in any of them is invisible.
+  //
+  // For a `changes`-style filter job that is fail-open twice over: its
+  // dependents are `if: needs.changes.outputs.code == 'true'`, so when it fails
+  // they are *skipped* rather than failed, and the gate deliberately counts
+  // `skipped` as passing (docs-only PRs). A masked `changes` failure therefore
+  // takes an entire required suite green with it.
+  //
+  // Scan every workflow, not just the four the gate aggregates: the gate reads
+  // all check runs on the SHA regardless of which workflow published them, and
+  // it evaluates main pushes too, where a push- or schedule-triggered workflow
+  // lands its check runs on the very same commit.
+  it('keeps every gate-required check-run name published by exactly one job', () => {
+    const publishers = new Map<string, string[]>();
+
+    for (const file of readdirSync(workflowsDir).filter((n) => n.endsWith('.yml') || n.endsWith('.yaml'))) {
+      const source = read(resolve(workflowsDir, file));
+
+      for (const job of workflowJobNames(source, file)) {
+        const { name, templated } = effectiveCheckName(source, job);
+        if (templated) {
+          continue;
+        }
+        publishers.set(name, [...(publishers.get(name) ?? []), `${file}:${job}`]);
+      }
+    }
+
+    // Every gated job's effective name has to be in `required` (asserted
+    // above), so keying off `required` still covers all four gated workflows
+    // while leaving harmless duplicates alone — two cron-only workflows may
+    // both call a job `monitor` without the gate ever reading either.
+    //
+    // Exactly one, not at-least-one: a zero-publisher name hangs the gate at
+    // "pending" forever, and checking both directions means an empty or
+    // mis-parsed scan above fails here instead of vacuously passing.
+    const misrouted = deployGateRequiredChecks()
+      .map((check) => ({ check, sites: publishers.get(check) ?? [] }))
+      .filter(({ sites }) => sites.length !== 1)
+      .map(({ check, sites }) => `${check} <- ${sites.length > 0 ? sites.join(', ') : 'no job publishes it'}`);
+
+    assert.deepEqual(
+      misrouted,
+      [],
+      `deploy-gate.yml keys on the check-run name only and keeps just the last-completed run, so a required name published by more than one job masks every other publisher's failure, and one published by none never leaves "pending" (#5822). Give each job a distinct name: ${misrouted.join('; ')}`,
+    );
+  });
+
+  it('paginates gate status history during the scheduled self-healing sweep', () => {
+    const deployGateJob = workflowJobBlock(deployGateWorkflow, 'gate');
+
+    assert.match(deployGateJob, /gh api --paginate --slurp/);
+    assert.match(deployGateJob, /commits\/\$s\/statuses\?per_page=100/);
+    assert.match(
+      deployGateJob,
+      /flatten \| map\(select\(\.context == "gate"\)\) \| first/,
+    );
+    assert.doesNotMatch(deployGateJob, /sort_by\(\.updated_at\)/);
+    assert.doesNotMatch(
+      deployGateJob,
+      /commits\/\$s\/status"/,
+      'the combined status endpoint silently truncates large commit-status histories',
+    );
+  });
+
+  it('paginates the check-run read the gate decides on', () => {
+    // Measured 2026-08-25 on 5559c5a12: that SHA carried 849 check runs and
+    // page one held none of the 20 required names, so the unpaginated read
+    // returned an empty set and the gate posted "pending, waiting for
+    // everything" once a day for four days. The truth was one failure,
+    // worker-tests. Seed Freshness Monitor reads this status on a 3-hour
+    // schedule and failed 33 times in a row against it.
+    //
+    // "Waiting" is the dangerous word: it tells a reader nothing is wrong yet,
+    // so nobody looks. A busy SHA must not be able to hide a red job behind it.
+    const deployGateJob = workflowJobBlock(deployGateWorkflow, 'gate');
+
+    assert.match(
+      deployGateJob,
+      /gh api --paginate --slurp[^\n]*\n[^\n]*commits\/\$SHA\/check-runs\?per_page=100/,
+      'the gate must read every page of check-runs; page one of a busy SHA holds none of the required names, and the gate then reports pending forever',
+    );
+    assert.doesNotMatch(
+      deployGateJob,
+      /gh api "repos\/\$REPO\/commits\/\$SHA\/check-runs\?per_page=100"/,
+      'an unpaginated check-run read reports "waiting" for jobs that already ran',
+    );
+  });
+
+  it('re-evaluates a stuck gate on the default branch, not only on open PRs', () => {
+    // The sweep healed open-PR heads only. A commit on main whose gate is
+    // stuck pending is never looked at again, and every scheduled consumer of
+    // that status fails until someone pushes a new commit.
+    const deployGateJob = workflowJobBlock(deployGateWorkflow, 'gate');
+
+    assert.match(
+      deployGateJob,
+      /default_branch/,
+      'the sweep must add the default branch head to its candidate SHAs',
+    );
+  });
+
+  it('gives every relay-key step our own API host, not upstream\'s', () => {
+    // Measured 2026-08-25. Same key, same headers, same second:
+    //   https://worldmonitor.sibt.ai/api/news/v1/list-feed-digest -> 200, 228KB
+    //   https://api.worldmonitor.app/api/news/v1/list-feed-digest -> 401
+    //   {"error":"Invalid API key"}
+    // api.worldmonitor.app is upstream's host and its WORLDMONITOR_VALID_KEYS
+    // does not carry our relay key. feed-validation.yml was the only workflow
+    // passing WORLDMONITOR_RELAY_KEY without also setting API_BASE_URL, so
+    // seed-recall-benchmark.mjs fell through to its upstream default, its
+    // digest warm 401'd, and news:recall-benchmark:v1 went unpublished on
+    // 8/22, 8/23, 8/24 and 8/25 while every one of those runs stayed green.
+    // The seed then expired and the freshness monitor read EMPTY.
+    //
+    // The block scan is per env: block, so a workflow that sets the host in
+    // one step does not excuse a second step that forgets it.
+    const workflowFiles = readdirSync(workflowsDir)
+      .filter((name) => name.endsWith('.yml') || name.endsWith('.yaml'));
+
+    const offenders: string[] = [];
+    for (const name of workflowFiles) {
+      const lines = read(resolve(workflowsDir, name)).split('\n');
+      for (let i = 0; i < lines.length; i += 1) {
+        const opener = /^(\s*)env:\s*$/.exec(lines[i]);
+        if (!opener) continue;
+        const indent = opener[1].length;
+        const block: string[] = [];
+        for (let j = i + 1; j < lines.length; j += 1) {
+          const line = lines[j];
+          if (line.trim() === '') continue;
+          if ((/^\s*/.exec(line) as RegExpExecArray)[0].length <= indent) break;
+          block.push(line);
+        }
+        const body = block.join('\n');
+        if (!body.includes('WORLDMONITOR_RELAY_KEY')) continue;
+        if (!body.includes('API_BASE_URL')) offenders.push(`${name}:${i + 1}`);
+      }
+    }
+
+    assert.deepEqual(
+      offenders,
+      [],
+      'every env: block passing WORLDMONITOR_RELAY_KEY must also set API_BASE_URL;'
+        + ' the default host in the seed scripts is upstream\'s and 401s our key',
+    );
+  });
+
+  it('treats sidecar changes as code for PR smoke gating', () => {
+    assert.ok(
+      testWorkflow.includes('^src-tauri\\/sidecar\\/'),
+      'test.yml must not classify src-tauri/sidecar changes as docs-only changes',
+    );
+  });
+
+  it('keeps resilience validation bundle inputs in the CI change filter', () => {
+    assert.ok(
+      testWorkflow.includes('validation: ${{ steps.diff.outputs.validation }}'),
+      'test.yml must expose a validation change output',
+    );
+    for (const input of REQUIRED_RESILIENCE_VALIDATION_INPUTS) {
+      assert.ok(testWorkflow.includes(workflowRegexNeedle(input)), `test.yml must cover ${input}`);
+    }
+  });
+
+  it('keeps desktop drift-gate inputs in the CI change filter (#5902)', () => {
+    assert.ok(
+      testWorkflow.includes('desktop_config: ${{ steps.diff.outputs.desktop_config }}'),
+      'test.yml must expose a desktop_config change output',
+    );
+    assert.ok(
+      testWorkflow.includes('desktop_rust: ${{ steps.diff.outputs.desktop_rust }}'),
+      'test.yml must expose a desktop_rust change output',
+    );
+    const desktopConfigFilter = shellAwkAssignmentBlock('DESKTOP_CONFIG');
+    const desktopRustFilter = shellAwkAssignmentBlock('DESKTOP_RUST');
+    for (const input of REQUIRED_DESKTOP_CONFIG_INPUTS) {
+      assert.ok(
+        desktopConfigFilter.includes(workflowRegexNeedle(input)),
+        `test.yml desktop_config filter must cover ${input}`,
+      );
+    }
+    assert.ok(
+      desktopConfigFilter.includes('/^\\.github\\/workflows\\/.*\\.ya?ml$/'),
+      'test.yml desktop_config filter must cover every workflow file for dynamic Tauri inventory',
+    );
+    assert.equal(
+      evaluateDesktopConfigFilter(desktopConfigFilter, ['.github/workflows/nightly.yaml']),
+      '1',
+      'desktop_config must trigger for a newly added workflow file',
+    );
+    assert.equal(
+      evaluateDesktopConfigFilter(desktopConfigFilter, ['src/app.ts']),
+      '0',
+      'desktop_config must not trigger for an unrelated source file',
+    );
+    for (const input of REQUIRED_DESKTOP_RUST_INPUTS) {
+      assert.ok(
+        desktopRustFilter.includes(workflowRegexNeedle(input)),
+        `test.yml desktop_rust filter must cover ${input}`,
+      );
+    }
+    assert.match(
+      testJobBlock('desktop-config'),
+      /if: needs\.changes\.outputs\.desktop_config == 'true'/,
+      'desktop-config job must use the desktop_config change output',
+    );
+    // Cargo.lock is the only thing that decides which crate versions ship, and
+    // no other job inspects it (security-audit covers npm lockfiles only), so
+    // dropping this step would let a cargo update silently reintroduce a known
+    // advisory — CVE-2026-42184 / #5518 is the case that motivated it.
+    const floorStep = workflowStepBlock(testWorkflow, 'Rust dependency security floors (#5518)');
+    assert.match(
+      floorStep,
+      /^\s+run: node scripts\/check-rust-security-floors\.mjs\s*$/m,
+      'desktop-config job must run the Rust dependency security-floor check',
+    );
+    // A presence-only assertion would stay green with the step neutered, so
+    // pin that it still fails the job (same guard the AppImage step carries).
+    assert.doesNotMatch(floorStep, /^\s+continue-on-error:/m);
+    const releaseFloorStep = workflowStepBlock(desktopBuildWorkflow, 'Rust dependency security floors (#5518)');
+    assert.match(
+      releaseFloorStep,
+      /^\s+run: node scripts\/check-rust-security-floors\.mjs\s*$/m,
+      'release workflow must verify the security floors of the lockfile it ships',
+    );
+    assert.doesNotMatch(releaseFloorStep, /^\s+continue-on-error:/m);
+    assert.match(
+      testJobBlock('desktop-rust'),
+      /if: needs\.changes\.outputs\.desktop_rust == 'true'/,
+      'desktop-rust job must use the desktop_rust change output',
+    );
+    // The sidecar handler bundle build must live in the `unit` job: its
+    // esbuild input graph spans src/ and server/ via the @/ alias, and only
+    // the `code` filter tracks that whole surface (#5902). A refactor moving
+    // it back to a narrower path-gated job would silently re-open the
+    // "bundle-breaking change with green PR CI" gap.
+    assert.match(
+      testJobBlock('unit'),
+      /^\s+node scripts\/build-sidecar-handlers\.mjs\s*$/m,
+      'unit job must run the sidecar handler bundle build',
+    );
+    // Desktop build env parity (#5905) runs in BOTH legs deliberately:
+    // desktop-config fires on workflow edits (build-desktop.yml is excluded
+    // from the `code` filter), while unit fires when src/ gains a new
+    // import.meta.env.VITE_ read. Dropping either leg reopens half the gap.
+    assert.match(
+      testJobBlock('desktop-config'),
+      /^\s+run: node scripts\/check-desktop-build-env\.mjs\s*$/m,
+      'desktop-config job must run the desktop build env parity check',
+    );
+    assert.match(
+      testJobBlock('unit'),
+      /^\s+run: node scripts\/check-desktop-build-env\.mjs\s*$/m,
+      'unit job must run the desktop build env parity check',
+    );
+    const releasePreflight = workflowStepBlock(desktopBuildWorkflow, 'Release client-env preflight (#5905)');
+    assert.match(releasePreflight, /\[ "\$\{\{ github\.event_name \}\}" = "push" \] \|\|/);
+    assert.match(releasePreflight, /\[ "\$\{\{ github\.event_name \}\}" = "workflow_dispatch" \]/);
+    assert.match(releasePreflight, /\[ "\$\{\{ github\.event\.inputs\.draft \}\}" != "true" \]/);
+    assert.doesNotMatch(releasePreflight, /VITE_VAPID_PUBLIC_KEY/);
+    const canaryPreflight = workflowStepBlock(desktopCanaryWorkflow, 'Client env preflight (#5905)');
+    assert.match(canaryPreflight, /requires non-empty client env/);
+    assert.match(canaryPreflight, /VITE_SUPABASE_URL/);
+    assert.match(canaryPreflight, /VITE_SUPABASE_ANON_KEY/);
+    assert.match(canaryPreflight, /VITE_CONVEX_URL/);
+    assert.doesNotMatch(canaryPreflight, /VITE_VAPID_PUBLIC_KEY/);
+    assert.throws(
+      () => runReleasePreflight(releasePreflight, 'push', '', ''),
+      (error) => error.status === 1,
+      'tag pushes must fail when client env secrets are empty',
+    );
+    assert.throws(
+      () => runReleasePreflight(releasePreflight, 'workflow_dispatch', 'false', ''),
+      (error) => error.status === 1,
+      'published manual dispatches must fail when client env secrets are empty',
+    );
+    assert.doesNotThrow(
+      () => runReleasePreflight(releasePreflight, 'workflow_dispatch', 'true', ''),
+      'draft manual dispatches may run with empty client env secrets',
+    );
+    assert.doesNotThrow(
+      () => runReleasePreflight(releasePreflight, 'push', '', 'configured'),
+      'populated tag releases must pass the client env preflight',
+    );
+    for (const variant of ['full', 'tech', 'finance'] as const) {
+      assert.match(
+        packageScripts[`desktop:build:${variant}`] ?? '',
+        /npm run desktop:check-env/,
+        `desktop:build:${variant} must run the local desktop env gate`,
+      );
+    }
+    const releasePostProcess = workflowStepBlock(desktopBuildWorkflow, 'Strip GPU libraries from AppImage');
+    assert.match(
+      releasePostProcess,
+      /^\s+bash scripts\/repack-linux-appimage\.sh "\$APPIMAGE" "\$TOOL_ARCH"\s*$/m,
+      'release workflow must apply the shared AppImage post-processing',
+    );
+    assert.match(releasePostProcess, /^\s+if: contains\(matrix\.platform, 'ubuntu'\)\s*$/m);
+    assert.doesNotMatch(releasePostProcess, /^\s+continue-on-error:/m);
+    const canaryPostProcess = workflowStepBlock(
+      desktopCanaryWorkflow,
+      'Apply release AppImage post-processing',
+    );
+    assert.match(
+      canaryPostProcess,
+      /^\s+bash scripts\/repack-linux-appimage\.sh "\$\{IMAGES\[0]}" x86_64\s*$/m,
+      'desktop canary must smoke-test the release-processed AppImage',
+    );
+    assert.doesNotMatch(canaryPostProcess, /^\s+(?:if|continue-on-error):/m);
+    const desktopCanarySmoke = workflowStepBlock(desktopCanaryWorkflow, 'Smoke-test AppImage');
+    assert.doesNotMatch(desktopCanarySmoke, /^\s+continue-on-error:/m);
+    assert.match(
+      desktopCanarySmoke,
+      /if CODE=\$\(curl[\s\S]{0,200}\[\[ "\$CODE" =~ \^\[1-5]\[0-9]\[0-9]\$ \]\]; then/,
+      'desktop canary readiness must require curl success and a real HTTP status',
+    );
+    assert.match(
+      desktopCanarySmoke,
+      /if FINAL_CODE=\$\(curl[\s\S]{0,200}\[\[ "\$FINAL_CODE" =~ \^\[1-5]\[0-9]\[0-9]\$ \]\]; then/,
+      'desktop canary must re-probe sidecar liveness after the observation window',
+    );
+    assert.ok(
+      desktopCanarySmoke.indexOf('if kill -0 "$APP_PID"') >
+        desktopCanarySmoke.indexOf('if FINAL_CODE=$(curl'),
+      'desktop canary must check app liveness after the final sidecar probe',
+    );
+    assert.match(
+      desktopCanarySmoke,
+      /^\s+if grep -q "SIDECAR_FINAL_STATUS=alive" \/tmp\/display-server\.log 2>\/dev\/null; then\s*$/m,
+      'desktop canary must gate success on final sidecar liveness',
+    );
+  });
+
+  it('runs workflow coverage when the release workflow changes', () => {
+    const codeFilter = shellAwkAssignmentBlock('CODE');
+    assert.doesNotMatch(
+      codeFilter,
+      /build-desktop\.yml/,
+      'build-desktop.yml changes must run the unit workflow-coverage assertions',
+    );
+  });
+
+  it('runs scheduled and per-PR production dependency audits for every package lockfile', () => {
+    const packageLockfiles = collectPackageLockfiles();
+
+    assert.match(securityAuditWorkflow, /\n {2}pull_request:\n/, 'security-audit.yml must run on PRs');
+    assert.match(securityAuditWorkflow, /\n {2}push:\n {4}branches: \[main\]\n/, 'security-audit.yml must run on main pushes');
+    assert.match(securityAuditWorkflow, /\n {2}schedule:\n/, 'security-audit.yml must run on a schedule');
+    assert.match(securityAuditWorkflow, /\n {2}security-audit:\n/, 'security-audit.yml must define the aggregate security-audit check');
+    assert.match(securityAuditWorkflow, /\n {4}name: security-audit\n/, 'security-audit.yml must publish a security-audit check run');
+    assert.match(
+      securityAuditWorkflow,
+      /if:\s*\$\{\{\s*always\(\)\s*\}\}/,
+      'security-audit.yml must always publish the aggregate check',
+    );
+    assert.match(
+      securityAuditWorkflow,
+      /AUDIT_RESULT"\s*=\s*"cancelled"/,
+      'security-audit.yml must publish a failing aggregate check when the audit matrix is cancelled',
+    );
+    assert.match(
+      securityAuditWorkflow,
+      /--package-json "\$\{\{ matrix\.package_json \}\}"/,
+      'security-audit.yml must pass nonstandard package manifests to the audit gate',
+    );
+    assert.match(
+      securityAuditWorkflow,
+      /node \.github\/scripts\/audit-production-dependencies\.mjs/,
+      'security-audit.yml must run the production dependency audit gate',
+    );
+    assert.match(
+      securityAuditScript,
+      /npm['"],\s*\[\s*['"]audit['"],\s*['"]--omit=dev['"],\s*['"]--json['"]/,
+      'the production dependency audit gate must run npm audit --omit=dev --json',
+    );
+    assert.match(
+      securityAuditScript,
+      /collectUnbaselinedFindings/,
+      'the production dependency audit gate must fail on unbaselined high-severity production advisories',
+    );
+    assert.deepEqual(
+      securityAuditMatrixLockfiles(),
+      packageLockfiles,
+      'security-audit.yml must cover exactly the repo package-lock.json files',
+    );
+
+    for (const lockfile of packageLockfiles) {
+      assert.match(
+        securityAuditWorkflow,
+        new RegExp(`\\n\\s+lockfile:\\s+${escapeRegExp(lockfile)}\\n`),
+        `security-audit.yml must cover ${lockfile}`,
+      );
+    }
+  });
+
+  it('keeps Docker base images pinned to immutable digests', () => {
+    const failures: string[] = [];
+
+    for (const dockerfile of collectDockerfiles()) {
+      const aliases = new Set<string>();
+      const source = readFileSync(resolve(root, dockerfile), 'utf8');
+      const lines = source.split('\n');
+
+      lines.forEach((line, index) => {
+        const match = line.match(/^FROM\s+(.+)$/i);
+        if (!match) return;
+
+        const parts = match[1].trim().split(/\s+/);
+        while (parts[0]?.startsWith('--')) {
+          parts.shift();
+        }
+
+        const image = parts[0];
+        const asIndex = parts.findIndex((part) => part.toUpperCase() === 'AS');
+        const alias = asIndex >= 0 ? parts[asIndex + 1] : undefined;
+        const isKnownStage = image ? aliases.has(image) : false;
+        if (alias) {
+          aliases.add(alias);
+        }
+
+        if (!image || image === 'scratch' || isKnownStage) return;
+
+        if (!/@sha256:[0-9a-f]{64}$/i.test(image)) {
+          failures.push(`${dockerfile}:${index + 1} ${line.trim()}`);
+        }
+      });
+    }
+
+    assert.deepEqual(
+      failures,
+      [],
+      `Docker FROM images must be pinned with full @sha256:<64 hex> digests:\n${failures.join('\n')}`,
+    );
+  });
+
+  it('keeps the deploy skip list and the seed image build triggers in lockstep', () => {
+    // deploy-web.yml skips a push that will start an image build, so the two
+    // lists must name the same paths. Drift either way is silent: a path the
+    // deploy skips but the image workflow ignores never deploys at all, and a
+    // path the image workflow rebuilds but the deploy does not skip races the
+    // registry and fails on a tag that is not there yet.
+    const imageWorkflow = read(resolve(workflowsDir, 'seed-container-image.yml'));
+    const deployWorkflow = read(resolve(workflowsDir, 'deploy-web.yml'));
+
+    const pathsBlock = imageWorkflow.match(/\n {4}paths:\n((?: {6}(?:- .*|#.*)?\n)+)/);
+    assert.ok(pathsBlock, 'seed-container-image.yml no longer declares a paths: list');
+    const triggerPaths = [...pathsBlock[1].matchAll(/^ {6}- '([^']+)'$/gm)]
+      // A directory glob and its prefix are the same rule to the deploy skip.
+      .map(([, glob]) => glob.replace(/\*\*$/, ''))
+      .sort();
+    assert.ok(triggerPaths.length > 0, 'parsed no paths out of seed-container-image.yml');
+
+    const skipList = deployWorkflow.match(/image_paths='\^\(([^']+)\)'/);
+    assert.ok(skipList, 'deploy-web.yml no longer declares an image_paths regex');
+    const skipPaths = skipList[1]
+      .split('|')
+      .map((alternative) => alternative.replace(/\\/g, ''))
+      .sort();
+
+    assert.deepEqual(
+      skipPaths,
+      triggerPaths,
+      'deploy-web.yml image_paths and seed-container-image.yml paths: have drifted',
+    );
+  });
+
+  it('keeps GitHub Actions external uses pinned to commit SHAs', () => {
+    const failures: string[] = [];
+    const workflowFiles = readdirSync(workflowsDir)
+      .filter((name) => name.endsWith('.yml') || name.endsWith('.yaml'))
+      .sort();
+
+    for (const workflowFile of workflowFiles) {
+      const source = readFileSync(resolve(workflowsDir, workflowFile), 'utf8');
+      const lines = source.split('\n');
+
+      lines.forEach((line, index) => {
+        const match = line.match(/^\s*uses:\s*([^@\s#]+)@([^\s#]+)/);
+        if (!match) return;
+
+        const [, action, ref] = match;
+        if (action.startsWith('./') || action.startsWith('docker://')) return;
+
+        if (!/^[0-9a-f]{40}$/i.test(ref)) {
+          failures.push(`${workflowFile}:${index + 1} ${line.trim()}`);
+        }
+      });
+    }
+
+    assert.deepEqual(
+      failures,
+      [],
+      `GitHub Actions uses refs must be 40-character commit SHAs:\n${failures.join('\n')}`,
+    );
+  });
+});

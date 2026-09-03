@@ -1,0 +1,58 @@
+# Publishes the fuel-prices seed from a GitHub runner every Sunday.
+#
+# Built 2026-08-19 after fuelPrices went EMPTY. The Cloudflare side is not
+# broken: the `0 10 * * SUN` trigger fired on 2026-08-16 and returned success,
+# and seed-bigmac.mjs — the other script on that same tick — wrote its
+# seed-meta at that minute. Only seed-fuel-prices.mjs wrote nothing, on that
+# Sunday and the one before, until the 10-day cache TTL expired the key.
+#
+# The seed's publish gate is strict on purpose: any failed source outside
+# TOLERATED_FAILURES (Brazil, New Zealand) rejects the whole publish rather
+# than shipping partial coverage as healthy. The script's own startup warning
+# names which sources need an egress that is not a datacenter — "NZ/BR/MX will
+# fail" without PROXY_URL — and PROXY_URL is not among the Worker's secrets.
+# Two of that trio are tolerated. Mexico is not, so one blocked fetch rejects
+# every run, forever, with no trace: a standalone seed script writes no run
+# record, and `wrangler containers` has no logs subcommand.
+#
+# This workflow tests that reading and, if a GitHub runner gets through, is
+# the fix. Read the [MX] and Summary lines in the run log: they name every
+# source that failed and whether the validator accepted the publish.
+#
+# Cadence matches the registry's own `0 10 * * SUN`, offset to :23 to stay off
+# the container tick at :00 and seed-fallback's :17. The key's TTL is 10 days,
+# so one missed Sunday is survivable and two are not.
+name: seed-fuel-prices
+on:
+  schedule:
+    - cron: "23 10 * * SUN"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency: seed-fuel-prices
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      # The seed chain imports exceljs, so this one cannot skip install the
+      # way seed-military-flights does. Same flags as Dockerfile.seeds.
+      - name: install seed deps
+        run: npm ci --prefix scripts --omit=dev --omit=optional --ignore-scripts
+      - name: run fuel-prices seed
+        env:
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          EIA_API_KEY: ${{ secrets.EIA_API_KEY }}
+          ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+          # Unset today. Listed so setting the secret is the only step left if
+          # a GitHub runner turns out to be blocked the same way.
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+          # Not a secret — the fork's own hostname. The seed scripts default
+          # their self-calls to the upstream author's api.worldmonitor.app.
+          API_BASE_URL: https://worldmonitor.sibt.ai
+        run: node scripts/seed-fuel-prices.mjs

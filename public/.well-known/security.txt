@@ -1,0 +1,6 @@
+Contact: mailto:hello@sibt.ai
+Contact: https://github.com/nkrvivek/worldmonitor/security/advisories
+Policy: https://github.com/nkrvivek/worldmonitor/security/advisories
+Preferred-Languages: en
+Canonical: https://worldmonitor.sibt.ai/.well-known/security.txt
+Expires: 2027-03-02T00:00:00.000Z

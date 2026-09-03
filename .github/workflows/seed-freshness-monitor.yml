@@ -1,0 +1,111 @@
+name: Seed Freshness Monitor
+
+# Off in the Actions tab, and the reason it was switched off is now fixed. The
+# acceptance step below asks a worker for /api/health?compact=1, which this fork
+# did not route -- worker/routes/domains.ts serves only the /api/health/v1/
+# prefix. worker/routes/health.ts now routes the bare path, so the check has
+# something to read. Turn the workflow back on from the Actions tab once
+# `node scripts/check-seed-freshness.mjs` passes against the live site; until
+# the seeds themselves report clean it would fail every 15 minutes.
+#
+# It also used to install the Railway CLI and reconcile the seed registry
+# against a Railway project. There is no such project here; the seeds run as
+# Cloudflare cron triggers. What that audit still checked -- that each row's
+# declared files match its import graph -- now runs in the test suite, in
+# tests/seed-services-registry.test.mjs.
+
+on:
+  schedule:
+    # Every three hours, not every fifteen minutes. The cadence should follow
+    # the thing being measured, and nothing here moves that fast: the tightest
+    # staleness budget in api/health.js is 75 minutes and most are 12 hours or
+    # more, so quarter-hourly polling produced twelve extra runs per hour that
+    # could not detect anything the next hour's run would miss. The cost was
+    # not compute, it was that a standing failure printed 96 identical red rows
+    # a day and stopped reading as a signal at all. Worst case we learn of a
+    # newsInsights failure up to three hours late, against a budget that
+    # already tolerates 75 minutes.
+    - cron: '0 */3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  statuses: read
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: ingestion-acceptance-production
+      deployment: false
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Read the main gate for scheduled acceptance
+        id: gate
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          # GitHub guarantees newest-first status history. Preserve that order:
+          # updated_at has only second resolution, so sorting can invert ties.
+          # deploy-gate.yml already names the checks it is waiting on or refused
+          # for, in the status description. Carry that through: an error saying
+          # only "main gate is failure" costs a reader a trip through every
+          # check-run on the commit to find which one broke, so this fired every
+          # 15 minutes for a day without anyone learning what it was about.
+          # A gh or jq failure must not take the measurement below with it. That
+          # coupling is the whole reason this step was split out, so it cannot
+          # come back through the error path.
+          gate=$(
+            gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/statuses?per_page=100" |
+              jq -r 'flatten | map(select(.context == "gate")) | first
+                     | "\(.state // "missing")\t\(.description // "no description")"'
+          ) || gate=$'error\tcould not read commit statuses'
+          gate_state=${gate%%$'\t'*}
+          gate_detail=${gate#*$'\t'}
+          echo "gate_state=$gate_state"
+          echo "gate_detail=$gate_detail"
+          echo "state=$gate_state" >> "$GITHUB_OUTPUT"
+          echo "detail=$gate_detail" >> "$GITHUB_OUTPUT"
+          if [ "$gate_state" != "success" ]; then
+            echo "::warning::Will not record ingestion operational acceptance: main gate is $gate_state at $GITHUB_SHA: $gate_detail. Measuring freshness first, then failing at the acceptance step."
+          else
+            echo "Exact main revision passed repository gates."
+          fi
+
+      # Always. The gate above decides whether this revision may CLAIM
+      # acceptance; it does not decide whether we are allowed to look. Those
+      # were the same step until 2026-08-13, so a docs-stats row missing from
+      # ARCHITECTURE.md stopped us measuring production ingestion for a day —
+      # and every one of those runs failed at the gate without ever reading a
+      # seed, which is indistinguishable in the Actions tab from a run that
+      # looked and found stale data. The monitor is worth most exactly when the
+      # repo is in a state a lint check dislikes.
+      - name: Measure ingestion freshness
+        run: node scripts/check-seed-freshness.mjs
+
+      # Fails when the gate did not pass, rather than skipping quietly. A
+      # skipped step leaves the run green, and a green run here means "ingestion
+      # is fresh on a revision we accept" — which is not what happened. The
+      # ordering carries the whole point: measure first, then decline to claim
+      # acceptance. Until 2026-08-13 this refusal ran BEFORE the measurement and
+      # so replaced it, which is how a missing docs-stats row bought a day of
+      # not looking at production.
+      - name: Record ingestion operational acceptance
+        env:
+          GATE_STATE: ${{ steps.gate.outputs.state }}
+          GATE_DETAIL: ${{ steps.gate.outputs.detail }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ] && [ "$GATE_STATE" != "success" ]; then
+            echo "::error::Ingestion freshness was measured above, but acceptance is not recorded: main gate is ${GATE_STATE:-missing} at $GITHUB_SHA: $GATE_DETAIL"
+            exit 1
+          fi
+          echo "Ingestion is fresh on a revision that passed repository gates."
