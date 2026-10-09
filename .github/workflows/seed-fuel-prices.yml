@@ -36,7 +36,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v6
         with:
           node-version: 24
       # The seed chain imports exceljs, so this one cannot skip install the
